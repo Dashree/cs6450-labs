@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"net"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/rstutsman/cs6450-labs/kvs"
 )
+
+const numShards = 8
 
 type Stats struct {
 	puts uint64
@@ -25,10 +28,35 @@ func (s *Stats) Sub(prev *Stats) Stats {
 	return r
 }
 
+type Shard struct {
+	muShard sync.RWMutex
+	mp      map[string]string
+}
+
+type ShardMap struct {
+	shards [numShards]*Shard
+}
+
+// Constructor
+func NewShardedMap() ShardMap {
+	m := ShardMap{}
+	for i := 0; i < numShards; i++ {
+		m.shards[i] = &Shard{
+			mp: make(map[string]string),
+		}
+	}
+	return m
+}
+
+func getShardIndex(key string) uint32 {
+	h := fnv.New32a()
+	h.Write([]byte(key))
+	return h.Sum32() % numShards
+}
+
 type KVService struct {
 	muStats   sync.Mutex
-	muMap     sync.RWMutex
-	mp        map[string]string
+	shardmp   ShardMap
 	stats     Stats
 	prevStats Stats
 	lastPrint time.Time
@@ -36,7 +64,7 @@ type KVService struct {
 
 func NewKVService() *KVService {
 	kvs := &KVService{}
-	kvs.mp = make(map[string]string)
+	kvs.shardmp = NewShardedMap()
 	kvs.lastPrint = time.Now()
 	return kvs
 }
@@ -46,9 +74,11 @@ func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) err
 	kv.stats.gets++
 	kv.muStats.Unlock()
 
-	kv.muMap.RLock()
-	value, found := kv.mp[request.Key]
-	kv.muMap.RUnlock()
+	idx := getShardIndex(request.Key)
+	sh := kv.shardmp.shards[idx]
+	sh.muShard.RLock()
+	defer sh.muShard.RUnlock()
+	value, found := sh.mp[request.Key]
 	if found {
 		response.Value = value
 	}
@@ -61,9 +91,11 @@ func (kv *KVService) Put(request *kvs.PutRequest, response *kvs.PutResponse) err
 	kv.stats.puts++
 	kv.muStats.Unlock()
 
-	kv.muMap.Lock()
-	kv.mp[request.Key] = request.Value
-	kv.muMap.Unlock()
+	idx := getShardIndex(request.Key)
+	sh := kv.shardmp.shards[idx]
+	sh.muShard.Lock()
+	defer sh.muShard.Unlock()
+	sh.mp[request.Key] = request.Value
 
 	return nil
 }
