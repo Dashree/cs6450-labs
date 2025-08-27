@@ -26,7 +26,8 @@ func (s *Stats) Sub(prev *Stats) Stats {
 }
 
 type KVService struct {
-	sync.Mutex
+	muStats   sync.Mutex
+	muMap     sync.RWMutex
 	mp        map[string]string
 	stats     Stats
 	prevStats Stats
@@ -41,12 +42,14 @@ func NewKVService() *KVService {
 }
 
 func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) error {
-	kv.Lock()
-	defer kv.Unlock()
-
+	kv.muStats.Lock()
 	kv.stats.gets++
+	kv.muStats.Unlock()
 
-	if value, found := kv.mp[request.Key]; found {
+	kv.muMap.RLock()
+	value, found := kv.mp[request.Key]
+	kv.muMap.RUnlock()
+	if found {
 		response.Value = value
 	}
 
@@ -54,25 +57,26 @@ func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) err
 }
 
 func (kv *KVService) Put(request *kvs.PutRequest, response *kvs.PutResponse) error {
-	kv.Lock()
-	defer kv.Unlock()
-
+	kv.muStats.Lock()
 	kv.stats.puts++
+	kv.muStats.Unlock()
 
+	kv.muMap.Lock()
 	kv.mp[request.Key] = request.Value
+	kv.muMap.Unlock()
 
 	return nil
 }
 
 func (kv *KVService) printStats() {
-	kv.Lock()
+	kv.muStats.Lock()
 	stats := kv.stats
 	prevStats := kv.prevStats
 	kv.prevStats = stats
 	now := time.Now()
 	lastPrint := kv.lastPrint
 	kv.lastPrint = now
-	kv.Unlock()
+	kv.muStats.Unlock()
 
 	diff := stats.Sub(&prevStats)
 	deltaS := now.Sub(lastPrint).Seconds()
