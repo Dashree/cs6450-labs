@@ -1,6 +1,3 @@
-//go:build ignore
-// +build ignore
-
 package main
 
 import (
@@ -102,8 +99,8 @@ func main() {
 
 	// Build one RPC client per server host
 	var clients []*Client
-	for i, h := range hosts {
-		clients[i] = Dial(h)
+	for _, h := range hosts {
+		clients = append(clients, Dial(h))
 	}
 
 	fmt.Printf("hosts %v\ntheta %.2f\nworkload %s\nsecs %d\n",

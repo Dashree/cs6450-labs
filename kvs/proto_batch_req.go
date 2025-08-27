@@ -1,3 +1,5 @@
+//go:build ignore
+// +build ignore
 package kvs
 
 type PutRequest struct {

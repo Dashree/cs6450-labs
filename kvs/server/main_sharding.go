@@ -1,5 +1,3 @@
-//go:build ignore
-// +build ignore
 package main
 
 import (
@@ -43,6 +41,7 @@ type KVService struct {
 
 func NewKVService(shardCount int) *KVService {
 	if shardCount <= 0 {
+		// shardCount = 64
 		shardCount = 64
 	}
 	ss := make([]shard, shardCount)
