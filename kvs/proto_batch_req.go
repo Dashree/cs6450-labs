@@ -1,5 +1,4 @@
-//go:build ignore
-// +build ignore
+
 package kvs
 
 type PutRequest struct {
@@ -15,6 +14,7 @@ type GetRequest struct {
 
 type GetResponse struct {
 	Value string
+	Found bool
 }
 
 /*************** NEW: batch API ****************/

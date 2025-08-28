@@ -1,3 +1,6 @@
+//go:build ignore
+// +build ignore
+
 package main
 
 import (
@@ -110,7 +113,7 @@ func main() {
 	done := atomic.Bool{}
 	resultsCh := make(chan uint64)
 
-	// Single worker (as before); you can spawn more if you want
+	// Single worker (as before); later spawn more if needed
 	go func(clientId int) {
 		wl := kvs.NewWorkload(*workloadName, *theta)
 		runClient(clientId, clients, &done, wl, resultsCh)

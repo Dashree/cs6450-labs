@@ -43,16 +43,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_ROOT="${ROOT}/logs"
 
 function cluster_size() {
-    geni-get -a | \
-        grep -Po '<host name=\\".*?\"' | \
-        sed 's/<host name=\\"\(.*\)\\"/\1/' | \
-        sort | \
-        uniq | \
-        wc -l
+    /usr/local/etc/emulab/tmcc hostnames | wc -l
 }
 
 # Get available node count first to determine defaults
 AVAILABLE_COUNT=$(cluster_size)
+# AVAILABLE_COUNT=4
+echo "available count $AVAILABLE_COUNT..."
 
 # Parse arguments with defaults based on available nodes
 if [ "$#" -eq 0 ]; then

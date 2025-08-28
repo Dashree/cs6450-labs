@@ -1,6 +1,3 @@
-//go:build ignore
-// +build ignore
-
 package main
 
 import (
@@ -56,65 +53,68 @@ func (c *Client) Batch(ops []kvs.BatchOp) []kvs.BatchItem {
 	return resp.Results
 }
 
-func fnv64a(s string) uint64 {
-	h := fnv.New64a()
+// func fnv64a(s string) uint64 {
+// 	h := fnv.New64a()
+// 	_, _ = h.Write([]byte(s))
+// 	return h.Sum64()
+// }
+
+func fnv32a(s string) uint32 {
+	h := fnv.New32a()
 	_, _ = h.Write([]byte(s))
-	return h.Sum64()
+	return h.Sum32()
 }
 
 func route(clients []*Client, key string) *Client {
-	idx := int(fnv64a(key) % uint64(len(clients)))
+	// idx := int(fnv64a(key) % uint64(len(clients)))
+	// return clients[idx]
+	idx := int(fnv32a(key) % uint32(len(clients)))
 	return clients[idx]
 }
 
 func runClient(id int, clients []*Client, done *atomic.Bool, workload *kvs.Workload, resultsCh chan<- uint64) {
-	value := strings.Repeat("x", 128)
-	const maxBatch = 1024 // max ops per RPC when contiguous and to same server
+    value := strings.Repeat("x", 128)
+    const maxBatch = 1024 // max ops per RPC when contiguous and to same server
 
-	var opsCompleted uint64
+    var opsCompleted uint64
 
-	var pending []*kvs.BatchOp // pooled to avoid reallocs
-	flush := func(c *Client, batch []kvs.BatchOp) {
-		if len(batch) == 0 {
-			return
-		}
-		_ = c.Batch(batch) // ignore read results for loadgen
-		opsCompleted += uint64(len(batch))
-	}
+    flush := func(c *Client, batch []kvs.BatchOp) {
+        if len(batch) == 0 || c == nil {
+            return
+        }
+        _ = c.Batch(batch) // ignore read results for loadgen
+        opsCompleted += uint64(len(batch))
+    }
 
-	var curClient *Client
-	var curBatch []kvs.BatchOp
+    var curClient *Client
+    var curBatch []kvs.BatchOp
 
-	for !done.Load() {
-		op := workload.Next()
-		key := fmt.Sprintf("%d", op.Key)
-		dest := route(clients, key)
+    for !done.Load() {
+        op := workload.Next()
+        key := fmt.Sprintf("%d", op.Key)
+        dest := route(clients, key)
 
-		// Start/continue a batch for the contiguous destination
-		if curClient == nil || dest != curClient || len(curBatch) >= maxBatch {
-			// flush previous
-			flush(curClient, curBatch)
-			// reset
-			curClient = dest
-			if cap(curBatch) < maxBatch {
-				curBatch = make([]kvs.BatchOp, 0, maxBatch)
-			} else {
-				curBatch = curBatch[:0]
-			}
-		}
+        // Start/continue a batch for the contiguous destination
+        if curClient == nil || dest != curClient || len(curBatch) >= maxBatch {
+            flush(curClient, curBatch)
+            curClient = dest
+            if cap(curBatch) < maxBatch {
+                curBatch = make([]kvs.BatchOp, 0, maxBatch)
+            } else {
+                curBatch = curBatch[:0]
+            }
+        }
 
-		if op.IsRead {
-			curBatch = append(curBatch, kvs.BatchOp{Key: key, IsRead: true})
-		} else {
-			curBatch = append(curBatch, kvs.BatchOp{Key: key, Value: value, IsRead: false})
-		}
-	}
+        if op.IsRead {
+            curBatch = append(curBatch, kvs.BatchOp{Key: key, IsRead: true})
+        } else {
+            curBatch = append(curBatch, kvs.BatchOp{Key: key, Value: value})
+        }
+    }
 
-	// final flush
-	flush(curClient, curBatch)
-
-	fmt.Printf("Client %d finished operations.\n", id)
-	resultsCh <- opsCompleted
+    flush(curClient, curBatch)
+    fmt.Printf("Client %d finished operations.\n", id)
+    resultsCh <- opsCompleted
 }
 
 type HostList []string
@@ -130,6 +130,7 @@ func main() {
 	theta := flag.Float64("theta", 0.99, "Zipfian distribution skew parameter")
 	workloadName := flag.String("workload", "YCSB-B", "Workload type (YCSB-A, YCSB-B, YCSB-C)")
 	secs := flag.Int("secs", 30, "Duration seconds")
+	threads := flag.Int("threads", 8, "workload generators in this process")
 	flag.Var(&hosts, "hosts", "Comma-separated host:port list (all used for sharding)")
 	flag.Parse()
 
@@ -151,10 +152,12 @@ func main() {
 	resultsCh := make(chan uint64)
 
 	// Single worker (spawn more if desired)
-	go func(clientId int) {
-		wl := kvs.NewWorkload(*workloadName, *theta)
-		runClient(clientId, clients, &done, wl, resultsCh)
-	}(0)
+	for i := 0; i < *threads; i++ {
+		go func(clientId int) {
+			wl := kvs.NewWorkload(*workloadName, *theta)
+			runClient(clientId, clients, &done, wl, resultsCh)
+		}(i)
+	}
 
 	time.Sleep(time.Duration(*secs) * time.Second)
 	done.Store(true)
