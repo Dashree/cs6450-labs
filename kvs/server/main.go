@@ -1,12 +1,14 @@
 package main
 
 import (
+	"crypto/sha256"
 	"flag"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"net/rpc"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,9 +27,14 @@ func (s *Stats) Sub(prev *Stats) Stats {
 	return r
 }
 
+type hashShard struct {
+	sync.RWMutex
+	mp map[string]string
+}
+
 type KVService struct {
-	sync.Mutex
-	mp        map[string]string
+	shards    [16]hashShard
+	statsLock sync.Mutex
 	stats     Stats
 	prevStats Stats
 	lastPrint time.Time
@@ -35,18 +42,29 @@ type KVService struct {
 
 func NewKVService() *KVService {
 	kvs := &KVService{}
-	kvs.mp = make(map[string]string)
+	for i := range kvs.shards {
+		kvs.shards[i] = hashShard{mp: make(map[string]string)}
+	}
 	kvs.lastPrint = time.Now()
 	return kvs
 }
 
+func bucket16(s string) int {
+	//AI helped write this hash function
+	norm := strings.ToLower(strings.TrimSpace(s))
+	sum := sha256.Sum256([]byte(norm))
+	return int(sum[0] & 0x0F)
+}
+
 func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) error {
-	kv.Lock()
-	defer kv.Unlock()
+	id := bucket16(request.Key)
+
+	kv.shards[id].RLock()
+	defer kv.shards[id].RUnlock()
 
 	kv.stats.gets++
 
-	if value, found := kv.mp[request.Key]; found {
+	if value, found := kv.shards[id].mp[request.Key]; found {
 		response.Value = value
 	}
 
@@ -54,25 +72,26 @@ func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) err
 }
 
 func (kv *KVService) Put(request *kvs.PutRequest, response *kvs.PutResponse) error {
-	kv.Lock()
-	defer kv.Unlock()
+	id := bucket16(request.Key)
+	kv.shards[id].Lock()
+	defer kv.shards[id].Unlock()
 
 	kv.stats.puts++
 
-	kv.mp[request.Key] = request.Value
+	kv.shards[id].mp[request.Key] = request.Value
 
 	return nil
 }
 
 func (kv *KVService) printStats() {
-	kv.Lock()
+	kv.statsLock.Lock()
 	stats := kv.stats
 	prevStats := kv.prevStats
 	kv.prevStats = stats
 	now := time.Now()
 	lastPrint := kv.lastPrint
 	kv.lastPrint = now
-	kv.Unlock()
+	kv.statsLock.Unlock()
 
 	diff := stats.Sub(&prevStats)
 	deltaS := now.Sub(lastPrint).Seconds()
