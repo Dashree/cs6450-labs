@@ -62,7 +62,9 @@ func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) err
 	kv.shards[id].RLock()
 	defer kv.shards[id].RUnlock()
 
+	kv.statsLock.Lock()
 	kv.stats.gets++
+	kv.statsLock.Unlock()
 
 	if value, found := kv.shards[id].mp[request.Key]; found {
 		response.Value = value
@@ -76,7 +78,9 @@ func (kv *KVService) Put(request *kvs.PutRequest, response *kvs.PutResponse) err
 	kv.shards[id].Lock()
 	defer kv.shards[id].Unlock()
 
+	kv.statsLock.Lock()
 	kv.stats.puts++
+	kv.statsLock.Unlock()
 
 	kv.shards[id].mp[request.Key] = request.Value
 
