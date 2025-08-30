@@ -113,20 +113,25 @@ func main() {
 	done := atomic.Bool{}
 	resultsCh := make(chan uint64)
 
-	host := hosts[0]
-	clientId := 0
-	go func(clientId int) {
-		workload := kvs.NewWorkload(*workload, *theta)
-		runClient(clientId, host, &done, workload, resultsCh)
-	}(clientId)
+	// host := hosts[0]
+	for clientId := 0; clientId < len(hosts); clientId++ {
+		go func(clientId int) {
+			workload := kvs.NewWorkload(*workload, *theta)
+			runClient(clientId, hosts[clientId], &done, workload, resultsCh)
+		}(clientId)
+	}
 
 	time.Sleep(time.Duration(*secs) * time.Second)
 	done.Store(true)
-
-	opsCompleted := <-resultsCh
+	
+	var tltOpsCompleted uint64 = 0
+	for clientId := 0; clientId < len(hosts); clientId++ {
+		//opsCompleted = <-resultsCh
+		tltOpsCompleted += <-resultsCh
+	}
 
 	elapsed := time.Since(start)
 
-	opsPerSec := float64(opsCompleted) / elapsed.Seconds()
+	opsPerSec := float64(tltOpsCompleted) / elapsed.Seconds()
 	fmt.Printf("throughput %.2f ops/s\n", opsPerSec)
 }
