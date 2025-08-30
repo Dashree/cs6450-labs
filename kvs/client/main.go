@@ -25,17 +25,17 @@ func Dial(addr string) *Client {
 	return &Client{rpcClient}
 }
 
-func (client *Client) Get(key string) string {
+func (client *Client) Get(keys []string) []string {
 	request := kvs.GetRequest{
-		Key: key,
+		Keys: keys,
 	}
 	response := kvs.GetResponse{}
 	err := client.rpcClient.Call("KVService.Get", &request, &response)
+
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	return response.Value
+	return response.Values
 }
 
 func (client *Client) Put(key string, value string) {
@@ -59,12 +59,17 @@ func runClient(id int, addr string, done *atomic.Bool, workload *kvs.Workload, r
 	opsCompleted := uint64(0)
 
 	for !done.Load() {
+		var keys = make([]string, 0)
 		for j := 0; j < batchSize; j++ {
 			op := workload.Next()
 			key := fmt.Sprintf("%d", op.Key)
+
 			if op.IsRead {
-				client.Get(key)
+				keys = append(keys, key)
 			} else {
+				//fmt.Print("getting ", cap(keys), "\n")
+				client.Get(keys)
+				keys = make([]string, 0)
 				client.Put(key, value)
 			}
 			opsCompleted++
@@ -115,10 +120,12 @@ func main() {
 
 	host := hosts[0]
 	clientId := 0
-	go func(clientId int) {
-		workload := kvs.NewWorkload(*workload, *theta)
-		runClient(clientId, host, &done, workload, resultsCh)
-	}(clientId)
+	for j := 0; j < 4; j++ {
+		go func(clientId int) {
+			workload := kvs.NewWorkload(*workload, *theta)
+			runClient(clientId, host, &done, workload, resultsCh)
+		}(clientId)
+	}
 
 	time.Sleep(time.Duration(*secs) * time.Second)
 	done.Store(true)

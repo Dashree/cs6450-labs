@@ -57,23 +57,29 @@ func bucket16(s string) int {
 }
 
 func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) error {
-	id := bucket16(request.Key)
+	var Values = make([]string, 0)
+	for i := 0; i < len(request.Keys); i++ {
+		Key := request.Keys[i]
+		id := bucket16(Key)
 
-	kv.shards[id].RLock()
-	defer kv.shards[id].RUnlock()
+		kv.shards[id].RLock()
 
-	kv.statsLock.Lock()
-	kv.stats.gets++
-	kv.statsLock.Unlock()
+		if value, found := kv.shards[id].mp[Key]; found {
+			Values = append(Values, value)
+		}
+		kv.shards[id].RUnlock()
 
-	if value, found := kv.shards[id].mp[request.Key]; found {
-		response.Value = value
 	}
+	kv.statsLock.Lock()
+	kv.stats.gets += uint64(cap(request.Keys))
+	kv.statsLock.Unlock()
+	response.Values = Values
 
 	return nil
 }
 
 func (kv *KVService) Put(request *kvs.PutRequest, response *kvs.PutResponse) error {
+
 	id := bucket16(request.Key)
 	kv.shards[id].Lock()
 	defer kv.shards[id].Unlock()
@@ -83,7 +89,6 @@ func (kv *KVService) Put(request *kvs.PutRequest, response *kvs.PutResponse) err
 	kv.statsLock.Unlock()
 
 	kv.shards[id].mp[request.Key] = request.Value
-
 	return nil
 }
 
