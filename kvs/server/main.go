@@ -28,9 +28,14 @@ func (s *Stats) Sub(prev *Stats) Stats {
 	return r
 }
 
+type Entry struct {
+	sync.RWMutex
+	value string
+}
+
 type Shard struct {
 	muShard sync.RWMutex
-	mp      map[string]string
+	mp      map[string]*Entry
 }
 
 type ShardMap struct {
@@ -38,11 +43,11 @@ type ShardMap struct {
 }
 
 // Constructor
-func NewShardedMap() ShardMap {
-	m := ShardMap{}
+func NewShardedMap() *ShardMap {
+	m := &ShardMap{}
 	for i := 0; i < numShards; i++ {
 		m.shards[i] = &Shard{
-			mp: make(map[string]string),
+			mp: make(map[string]*Entry),
 		}
 	}
 	return m
@@ -55,8 +60,9 @@ func getShardIndex(key string) uint32 {
 }
 
 type KVService struct {
-	muStats   sync.Mutex
-	shardmp   ShardMap
+	muStatsGets   sync.Mutex
+	muStatsPuts   sync.Mutex
+	shardmp   *ShardMap
 	stats     Stats
 	prevStats Stats
 	lastPrint time.Time
@@ -70,45 +76,57 @@ func NewKVService() *KVService {
 }
 
 func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) error {
-	kv.muStats.Lock()
+	kv.muStatsGets.Lock()
 	kv.stats.gets++
-	kv.muStats.Unlock()
+	kv.muStatsGets.Unlock()
 
 	idx := getShardIndex(request.Key)
 	sh := kv.shardmp.shards[idx]
-	sh.muShard.RLock()
-	defer sh.muShard.RUnlock()
-	value, found := sh.mp[request.Key]
+	entry, found := sh.mp[request.Key]
 	if found {
-		response.Value = value
+		entry.RLock()
+		response.Value = entry.value
+		entry.RUnlock()
 	}
 
 	return nil
 }
 
 func (kv *KVService) Put(request *kvs.PutRequest, response *kvs.PutResponse) error {
-	kv.muStats.Lock()
+	kv.muStatsPuts.Lock()
 	kv.stats.puts++
-	kv.muStats.Unlock()
+	kv.muStatsPuts.Unlock()
 
 	idx := getShardIndex(request.Key)
 	sh := kv.shardmp.shards[idx]
-	sh.muShard.Lock()
-	defer sh.muShard.Unlock()
-	sh.mp[request.Key] = request.Value
+	entry, found := sh.mp[request.Key]
+	if found {
+		entry.Lock()
+		entry.value = request.Value
+		entry.Unlock()
+	} else {
+		entry := Entry{value:request.Value}
+		entry.Lock() // Not sure if we need it
+		sh.mp[request.Key] = &entry
+		entry.Unlock()
+
+	}
+
 
 	return nil
 }
 
 func (kv *KVService) printStats() {
-	kv.muStats.Lock()
+	kv.muStatsGets.Lock()
+	kv.muStatsPuts.Lock()
 	stats := kv.stats
 	prevStats := kv.prevStats
 	kv.prevStats = stats
 	now := time.Now()
 	lastPrint := kv.lastPrint
 	kv.lastPrint = now
-	kv.muStats.Unlock()
+	kv.muStatsPuts.Unlock()
+	kv.muStatsGets.Unlock()
 
 	diff := stats.Sub(&prevStats)
 	deltaS := now.Sub(lastPrint).Seconds()
