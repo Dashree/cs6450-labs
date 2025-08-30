@@ -54,25 +54,25 @@ func NewKVService(shardCount int) *KVService {
 	}
 }
 
-// func fnv64a(s string) uint64 {
-// 	h := fnv.New64a()
-// 	_, _ = h.Write([]byte(s))
-// 	return h.Sum64()
-// }
-
-func fnv32a(s string) uint32 {
-	h := fnv.New32a()
+func fnv64a(s string) uint64 {
+	h := fnv.New64a()
 	_, _ = h.Write([]byte(s))
-	return h.Sum32()
+	return h.Sum64()
 }
 
+// func fnv32a(s string) uint32 {
+// 	h := fnv.New32a()
+// 	_, _ = h.Write([]byte(s))
+// 	return h.Sum32()
+// }
+
 func (kv *KVService) shardFor(key string) *shard {
-	// n := uint64(len(kv.shards))
-	// idx := int(fnv64a(key) % n)
-	// return &kv.shards[idx]
-	n := len(kv.shards)
-	idx := int(fnv32a(key) % uint32(n))
+	n := uint64(len(kv.shards))
+	idx := int(fnv64a(key) % n)
 	return &kv.shards[idx]
+	// n := len(kv.shards)
+	// idx := int(fnv32a(key) % uint32(n))
+	// return &kv.shards[idx]
 }
 
 // ---- RPC: Get ----

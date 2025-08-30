@@ -53,23 +53,23 @@ func (c *Client) Batch(ops []kvs.BatchOp) []kvs.BatchItem {
 	return resp.Results
 }
 
-// func fnv64a(s string) uint64 {
-// 	h := fnv.New64a()
-// 	_, _ = h.Write([]byte(s))
-// 	return h.Sum64()
-// }
-
-func fnv32a(s string) uint32 {
-	h := fnv.New32a()
+func fnv64a(s string) uint64 {
+	h := fnv.New64a()
 	_, _ = h.Write([]byte(s))
-	return h.Sum32()
+	return h.Sum64()
 }
 
+// func fnv32a(s string) uint32 {
+// 	h := fnv.New32a()
+// 	_, _ = h.Write([]byte(s))
+// 	return h.Sum32()
+// }
+
 func route(clients []*Client, key string) *Client {
-	// idx := int(fnv64a(key) % uint64(len(clients)))
-	// return clients[idx]
-	idx := int(fnv32a(key) % uint32(len(clients)))
+	idx := int(fnv64a(key) % uint64(len(clients)))
 	return clients[idx]
+	// idx := int(fnv32a(key) % uint32(len(clients)))
+	// return clients[idx]
 }
 
 func runClient(id int, clients []*Client, done *atomic.Bool, workload *kvs.Workload, resultsCh chan<- uint64) {
@@ -133,7 +133,6 @@ func main() {
 	threads := flag.Int("threads", 8, "workload generators in this process")
 	flag.Var(&hosts, "hosts", "Comma-separated host:port list (all used for sharding)")
 	flag.Parse()
-
 	if len(hosts) == 0 {
 		hosts = append(hosts, "localhost:8080")
 	}
