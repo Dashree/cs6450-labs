@@ -118,13 +118,15 @@ func main() {
 	done := atomic.Bool{}
 	resultsCh := make(chan uint64)
 
-	host := hosts[0]
 	clientId := 0
-	for j := 0; j < 4; j++ {
-		go func(clientId int) {
-			workload := kvs.NewWorkload(*workload, *theta)
-			runClient(clientId, host, &done, workload, resultsCh)
-		}(clientId)
+	for i := 0; i < 2; i++ {
+		host := hosts[i]
+		for j := 0; j < 16; j++ {
+			go func(clientId int) {
+				workload := kvs.NewWorkload(*workload, *theta)
+				runClient(clientId, host, &done, workload, resultsCh)
+			}(clientId)
+		}
 	}
 
 	time.Sleep(time.Duration(*secs) * time.Second)

@@ -71,7 +71,7 @@ func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) err
 
 	}
 	kv.statsLock.Lock()
-	kv.stats.gets += uint64(cap(request.Keys))
+	kv.stats.gets += uint64(len(request.Keys))
 	kv.statsLock.Unlock()
 	response.Values = Values
 
