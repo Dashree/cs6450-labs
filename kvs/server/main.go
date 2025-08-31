@@ -68,6 +68,48 @@ func (kv *KVService) Put(request *kvs.PutRequest, response *kvs.PutResponse) err
 	return nil
 }
 
+// ExecuteBatch processes multiple operations in a single call
+func (kv *KVService) ExecuteBatch(request *kvs.BatchRequest, response *kvs.BatchResponse) error {
+	// Pre-allocate response slices
+	response.Values = make([]string, len(request.Operations))
+	response.Errors = make([]error, len(request.Operations))
+
+	// Process all operations in the batch
+	for i, op := range request.Operations {
+		switch op.Type {
+		case kvs.OpGet:
+			// Handle GET operation
+			kv.muStats.Lock()
+			kv.stats.gets++
+			kv.muStats.Unlock()
+
+			kv.muMap.RLock()
+			value, found := kv.mp[op.Key]
+			kv.muMap.RUnlock()
+
+			if found {
+				response.Values[i] = value
+			}
+			response.Errors[i] = nil
+
+		case kvs.OpPut:
+			// Handle PUT operation
+			kv.muStats.Lock()
+			kv.stats.puts++
+			kv.muStats.Unlock()
+
+			kv.muMap.Lock()
+			kv.mp[op.Key] = op.Value
+			kv.muMap.Unlock()
+
+			response.Values[i] = "" // No value for PUT operations
+			response.Errors[i] = nil
+		}
+	}
+
+	return nil
+}
+
 func (kv *KVService) printStats() {
 	kv.muStats.Lock()
 	stats := kv.stats

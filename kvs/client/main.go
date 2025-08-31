@@ -50,24 +50,67 @@ func (client *Client) Put(key string, value string) {
 	}
 }
 
+// ExecuteBatch processes multiple operations in a single RPC call
+func (client *Client) ExecuteBatch(operations []kvs.Operation) *kvs.BatchResponse {
+	request := kvs.BatchRequest{
+		Operations: operations,
+	}
+	response := kvs.BatchResponse{}
+
+	err := client.rpcClient.Call("KVService.ExecuteBatch", &request, &response)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	return &response
+}
+
 func runClient(id int, addr string, done *atomic.Bool, workload *kvs.Workload, resultsCh chan<- uint64) {
 	client := Dial(addr)
 
 	value := strings.Repeat("x", 128)
 	const batchSize = 1024
+	const rpcBatchSize = 64 // Number of operations per RPC call
 
 	opsCompleted := uint64(0)
 
 	for !done.Load() {
-		for j := 0; j < batchSize; j++ {
-			op := workload.Next()
-			key := fmt.Sprintf("%d", op.Key)
-			if op.IsRead {
-				client.Get(key)
-			} else {
-				client.Put(key, value)
+		// Process operations in batches
+		for j := 0; j < batchSize; j += rpcBatchSize {
+			// Determine how many operations to process in this batch
+			remaining := batchSize - j
+			currentBatchSize := rpcBatchSize
+			if remaining < rpcBatchSize {
+				currentBatchSize = remaining
 			}
-			opsCompleted++
+
+			// Create batch of operations
+			operations := make([]kvs.Operation, currentBatchSize)
+			for k := 0; k < currentBatchSize; k++ {
+				op := workload.Next()
+				operations[k] = kvs.Operation{
+					Type:  kvs.OpGet,
+					Key:   fmt.Sprintf("%d", op.Key),
+					Value: "",
+				}
+				if !op.IsRead {
+					operations[k].Type = kvs.OpPut
+					operations[k].Value = value
+				}
+			}
+
+			// Execute batch
+			response := client.ExecuteBatch(operations)
+
+			// Process results (for GET operations)
+			for k, op := range operations {
+				if op.Type == kvs.OpGet && k < len(response.Values) {
+					// Store or use the retrieved value if needed
+					_ = response.Values[k]
+				}
+			}
+
+			opsCompleted += uint64(currentBatchSize)
 		}
 	}
 
