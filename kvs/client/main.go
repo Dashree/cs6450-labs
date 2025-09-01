@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/rpc"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -50,7 +51,18 @@ func (client *Client) Put(key string, value string) {
 	}
 }
 
-func runClient(id int, addr string, done *atomic.Bool, workload *kvs.Workload, resultsCh chan<- uint64) {
+type operationCount struct {
+	mu  sync.Mutex
+	sum uint64
+}
+
+func (c *operationCount) incrementer(ops uint64) {
+	c.mu.Lock()
+	c.sum = c.sum + ops
+	c.mu.Unlock()
+}
+
+func runClient(opsCount *operationCount, id int, addr string, done *atomic.Bool, workload *kvs.Workload, resultsCh chan<- uint64) {
 	client := Dial(addr)
 
 	value := strings.Repeat("x", 128)
@@ -77,8 +89,8 @@ func runClient(id int, addr string, done *atomic.Bool, workload *kvs.Workload, r
 	}
 
 	fmt.Printf("Client %d finished operations.\n", id)
+	opsCount.incrementer(opsCompleted)
 
-	resultsCh <- opsCompleted
 }
 
 type HostList []string
@@ -117,22 +129,30 @@ func main() {
 
 	done := atomic.Bool{}
 	resultsCh := make(chan uint64)
+	var opsCounter = operationCount{sum: 0}
 
+	var wg sync.WaitGroup
 	clientId := 0
-	for i := 0; i < 2; i++ {
+	var numberOfHosts = 1
+	var numberOfClientsPerHost = 16
+	wg.Add(numberOfHosts * numberOfClientsPerHost)
+	for i := 0; i < numberOfHosts; i++ {
 		host := hosts[i]
-		for j := 0; j < 16; j++ {
+		for j := 0; j < numberOfClientsPerHost; j++ {
 			go func(clientId int) {
 				workload := kvs.NewWorkload(*workload, *theta)
-				runClient(clientId, host, &done, workload, resultsCh)
+				runClient(&opsCounter, clientId, host, &done, workload, resultsCh)
+				wg.Done()
 			}(clientId)
+
 		}
 	}
 
 	time.Sleep(time.Duration(*secs) * time.Second)
 	done.Store(true)
 
-	opsCompleted := <-resultsCh
+	wg.Wait()
+	opsCompleted := opsCounter.sum
 
 	elapsed := time.Since(start)
 
