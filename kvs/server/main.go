@@ -28,14 +28,9 @@ func (s *Stats) Sub(prev *Stats) Stats {
 	return r
 }
 
-type Entry struct {
-	sync.RWMutex
-	value string
-}
-
 type Shard struct {
 	muShard sync.RWMutex
-	mp      map[string]*Entry
+	mp      map[string]string
 }
 
 type ShardMap struct {
@@ -47,7 +42,7 @@ func NewShardedMap() *ShardMap {
 	m := &ShardMap{}
 	for i := 0; i < numShards; i++ {
 		m.shards[i] = &Shard{
-			mp: make(map[string]*Entry),
+			mp: make(map[string]string),
 		}
 	}
 	return m
@@ -60,12 +55,12 @@ func getShardIndex(key string) uint32 {
 }
 
 type KVService struct {
-	muStatsGets   sync.Mutex
-	muStatsPuts   sync.Mutex
-	shardmp   *ShardMap
-	stats     Stats
-	prevStats Stats
-	lastPrint time.Time
+	muStatsGets sync.Mutex
+	muStatsPuts sync.Mutex
+	shardmp     *ShardMap
+	stats       Stats
+	prevStats   Stats
+	lastPrint   time.Time
 }
 
 func NewKVService() *KVService {
@@ -82,13 +77,12 @@ func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) err
 
 	idx := getShardIndex(request.Key)
 	sh := kv.shardmp.shards[idx]
-	entry, found := sh.mp[request.Key]
+	sh.muShard.RLock()
+	val, found := sh.mp[request.Key]
 	if found {
-		entry.RLock()
-		response.Value = entry.value
-		entry.RUnlock()
+		response.Value = val
 	}
-
+	sh.muShard.RUnlock()
 	return nil
 }
 
@@ -99,19 +93,9 @@ func (kv *KVService) Put(request *kvs.PutRequest, response *kvs.PutResponse) err
 
 	idx := getShardIndex(request.Key)
 	sh := kv.shardmp.shards[idx]
-	entry, found := sh.mp[request.Key]
-	if found {
-		entry.Lock()
-		entry.value = request.Value
-		entry.Unlock()
-	} else {
-		entry := Entry{value:request.Value}
-		entry.Lock() // Not sure if we need it
-		sh.mp[request.Key] = &entry
-		entry.Unlock()
-
-	}
-
+	sh.muShard.Lock()
+	sh.mp[request.Key] = request.Value
+	sh.muShard.Unlock()
 
 	return nil
 }

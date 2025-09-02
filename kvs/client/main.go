@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/rpc"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -113,17 +114,20 @@ func main() {
 	done := atomic.Bool{}
 	resultsCh := make(chan uint64)
 
-	// host := hosts[0]
-	for clientId := 0; clientId < len(hosts); clientId++ {
-		go func(clientId int) {
-			workload := kvs.NewWorkload(*workload, *theta)
-			runClient(clientId, hosts[clientId], &done, workload, resultsCh)
-		}(clientId)
+	numAvailCPUs := runtime.NumCPU() - 2
+
+	for i := 0; i < numAvailCPUs; i++ {
+		for clientId := 0; clientId < len(hosts); clientId++ {
+			go func(clientId int) {
+				workload := kvs.NewWorkload(*workload, *theta)
+				runClient(clientId, hosts[clientId], &done, workload, resultsCh)
+			}(clientId)
+		}
 	}
 
 	time.Sleep(time.Duration(*secs) * time.Second)
 	done.Store(true)
-	
+
 	var tltOpsCompleted uint64 = 0
 	for clientId := 0; clientId < len(hosts); clientId++ {
 		//opsCompleted = <-resultsCh
