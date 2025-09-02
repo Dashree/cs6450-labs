@@ -14,7 +14,7 @@ import (
 	"github.com/rstutsman/cs6450-labs/kvs"
 )
 
-const numShards = 8
+const numShards = 16
 
 type Stats struct {
 	puts uint64
@@ -29,8 +29,7 @@ func (s *Stats) Sub(prev *Stats) Stats {
 }
 
 type Shard struct {
-	muShard sync.RWMutex
-	mp      map[string]string
+	mp sync.Map
 }
 
 type ShardMap struct {
@@ -41,9 +40,7 @@ type ShardMap struct {
 func NewShardedMap() *ShardMap {
 	m := &ShardMap{}
 	for i := 0; i < numShards; i++ {
-		m.shards[i] = &Shard{
-			mp: make(map[string]string),
-		}
+		m.shards[i] = &Shard{}
 	}
 	return m
 }
@@ -74,15 +71,20 @@ func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) err
 	kv.muStatsGets.Lock()
 	kv.stats.gets++
 	kv.muStatsGets.Unlock()
+	var resBatch []string
 
-	idx := getShardIndex(request.Key)
-	sh := kv.shardmp.shards[idx]
-	sh.muShard.RLock()
-	val, found := sh.mp[request.Key]
-	if found {
-		response.Value = val
+	for _, key := range request.Key {
+		idx := getShardIndex(key)
+		sh := kv.shardmp.shards[idx]
+		val, found := sh.mp.Load(key)
+		if val, ok := val.(string); ok && found {
+			resBatch = append(resBatch, val)
+		} else {
+			resBatch = append(resBatch, "")
+		}
 	}
-	sh.muShard.RUnlock()
+	response.Value = resBatch
+
 	return nil
 }
 
@@ -93,9 +95,7 @@ func (kv *KVService) Put(request *kvs.PutRequest, response *kvs.PutResponse) err
 
 	idx := getShardIndex(request.Key)
 	sh := kv.shardmp.shards[idx]
-	sh.muShard.Lock()
-	sh.mp[request.Key] = request.Value
-	sh.muShard.Unlock()
+	sh.mp.Store(request.Key, request.Value)
 
 	return nil
 }

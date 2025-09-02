@@ -13,6 +13,8 @@ import (
 	"github.com/rstutsman/cs6450-labs/kvs"
 )
 
+const reqBatchsize = 20
+
 type Client struct {
 	rpcClient *rpc.Client
 }
@@ -26,7 +28,7 @@ func Dial(addr string) *Client {
 	return &Client{rpcClient}
 }
 
-func (client *Client) Get(key string) string {
+func (client *Client) Get(key []string) []string {
 	request := kvs.GetRequest{
 		Key: key,
 	}
@@ -58,14 +60,24 @@ func runClient(id int, addr string, done *atomic.Bool, workload *kvs.Workload, r
 	const batchSize = 1024
 
 	opsCompleted := uint64(0)
+	var reqBatch []string
 
 	for !done.Load() {
 		for j := 0; j < batchSize; j++ {
 			op := workload.Next()
 			key := fmt.Sprintf("%d", op.Key)
 			if op.IsRead {
-				client.Get(key)
+				if len(reqBatch) <= 20 {
+					reqBatch = append(reqBatch, key)
+				} else {
+					client.Get(reqBatch)
+					reqBatch = nil
+				}
 			} else {
+				if len(reqBatch) > 0 {
+					client.Get(reqBatch)
+					reqBatch = nil
+				}
 				client.Put(key, value)
 			}
 			opsCompleted++
