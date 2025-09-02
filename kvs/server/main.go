@@ -33,7 +33,7 @@ type hashShard struct {
 }
 
 type KVService struct {
-	shards    [16]hashShard
+	shards    [1]hashShard
 	statsLock sync.Mutex
 	stats     Stats
 	prevStats Stats
@@ -60,7 +60,8 @@ func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) err
 	var Values = make([]string, 0)
 	for i := 0; i < len(request.Keys); i++ {
 		Key := request.Keys[i]
-		id := bucket16(Key)
+		//id := bucket16(Key)
+		id := 0
 
 		kv.shards[id].RLock()
 
@@ -80,7 +81,8 @@ func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) err
 
 func (kv *KVService) Put(request *kvs.PutRequest, response *kvs.PutResponse) error {
 
-	id := bucket16(request.Key)
+	// id := bucket16(request.Key)
+	id := 0
 	kv.shards[id].Lock()
 	defer kv.shards[id].Unlock()
 

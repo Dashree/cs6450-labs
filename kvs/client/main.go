@@ -66,7 +66,7 @@ func runClient(opsCount *operationCount, id int, addr string, done *atomic.Bool,
 	client := Dial(addr)
 
 	value := strings.Repeat("x", 128)
-	const batchSize = 1024
+	const batchSize = 100
 
 	opsCompleted := uint64(0)
 
@@ -79,13 +79,14 @@ func runClient(opsCount *operationCount, id int, addr string, done *atomic.Bool,
 			if op.IsRead {
 				keys = append(keys, key)
 			} else {
-				//fmt.Print("getting ", cap(keys), "\n")
 				client.Get(keys)
 				keys = make([]string, 0)
 				client.Put(key, value)
+				break
 			}
 			opsCompleted++
 		}
+		client.Get(keys)
 	}
 
 	fmt.Printf("Client %d finished operations.\n", id)
