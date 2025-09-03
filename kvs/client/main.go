@@ -156,20 +156,33 @@ func main() {
 	done := atomic.Bool{}
 	resultsCh := make(chan uint64)
 
-	host := hosts[0]
-	clientId := 0
-	go func(clientId int) {
-		workload := kvs.NewWorkload(*workload, *theta)
-		runClient(clientId, host, &done, workload, resultsCh)
-	}(clientId)
+	// host := hosts[0]
+	// clientId := 0
+	// go func(clientId int) {
+	// 	workload := kvs.NewWorkload(*workload, *theta)
+	// 	runClient(clientId, host, &done, workload, resultsCh)
+	// }(clientId)
+	for i, host := range hosts {
+    go func(clientId int, h string) {
+        wl := kvs.NewWorkload(*workload, *theta)
+        runClient(clientId, h, &done, wl, resultsCh)
+    }(i, host)
+}
 
+	// Run for N seconds, then signal all clients to stop
 	time.Sleep(time.Duration(*secs) * time.Second)
 	done.Store(true)
 
-	opsCompleted := <-resultsCh
+	// Collect one result per goroutine we launched
+	var total uint64
+	for i := 0; i < len(hosts); i++ {
+    total += <-resultsCh
+	}
 
+	// opsCompleted := <-resultsCh
+	// opsPerSec := float64(opsCompleted) / elapsed.Seconds()
+	// fmt.Printf("throughput %.2f ops/s\n", opsPerSec)
 	elapsed := time.Since(start)
-
-	opsPerSec := float64(opsCompleted) / elapsed.Seconds()
+	opsPerSec := float64(total) / elapsed.Seconds()
 	fmt.Printf("throughput %.2f ops/s\n", opsPerSec)
 }
