@@ -59,17 +59,9 @@ func fnv64a(s string) uint64 {
 	return h.Sum64()
 }
 
-// func fnv32a(s string) uint32 {
-// 	h := fnv.New32a()
-// 	_, _ = h.Write([]byte(s))
-// 	return h.Sum32()
-// }
-
 func route(clients []*Client, key string) *Client {
 	idx := int(fnv64a(key) % uint64(len(clients)))
 	return clients[idx]
-	// idx := int(fnv32a(key) % uint32(len(clients)))
-	// return clients[idx]
 }
 
 func runClient(id int, clients []*Client, done *atomic.Bool, workload *kvs.Workload, resultsCh chan<- uint64) {
@@ -113,7 +105,7 @@ func runClient(id int, clients []*Client, done *atomic.Bool, workload *kvs.Workl
     }
 
     flush(curClient, curBatch)
-    fmt.Printf("Client %d finished operations.\n", id)
+    // fmt.Printf("Client %d finished operations.\n", id)
     resultsCh <- opsCompleted
 }
 
@@ -124,6 +116,8 @@ func (h *HostList) Set(value string) error {
 	*h = strings.Split(value, ",")
 	return nil
 }
+
+// ... same imports and types ...
 
 func main() {
 	var hosts HostList
@@ -137,20 +131,22 @@ func main() {
 		hosts = append(hosts, "localhost:8080")
 	}
 
-	// Build one RPC client per server host (FIX: preallocate to avoid index panic)
+	// One RPC client per server host
 	clients := make([]*Client, len(hosts))
 	for i, h := range hosts {
 		clients[i] = Dial(h)
 	}
 
-	fmt.Printf("hosts %v\ntheta %.2f\nworkload %s\nsecs %d\n",
-		hosts, *theta, *workloadName, *secs)
+	totalG := (*threads) * len(clients) // total goroutines we will launch
+
+	fmt.Printf("hosts %v\ntheta %.2f\nworkload %s\nsecs %d\nthreads %d (per server), total goroutines %d\n",
+		hosts, *theta, *workloadName, *secs, *threads, totalG)
 
 	start := time.Now()
 	done := atomic.Bool{}
-	resultsCh := make(chan uint64)
+	resultsCh := make(chan uint64, totalG) // buffer so sends never block at shutdown
 
-
+	// Launch workers
 	for _, c := range clients {
 		for i := 0; i < *threads; i++ {
 			go func(clientId int, client *Client) {
@@ -160,12 +156,20 @@ func main() {
 		}
 	}
 
+	// Run for the requested duration
 	time.Sleep(time.Duration(*secs) * time.Second)
 	done.Store(true)
 
-	opsCompleted := <-resultsCh
+	// Collect ALL results
+	var totalOps uint64
+	for i := 0; i < totalG; i++ {
+		totalOps += <-resultsCh
+	}
 	elapsed := time.Since(start)
-	opsPerSec := float64(opsCompleted) / elapsed.Seconds()
-	fmt.Printf("throughput %.2f ops/s\n", opsPerSec)
+
+	opsPerSec := float64(totalOps) / elapsed.Seconds()
+	fmt.Printf("elapsed %v, total ops %d, throughput %.2f ops/s (%.3f Mops/s)\n",
+		elapsed, totalOps, opsPerSec, opsPerSec/1e6)
 }
+
 
