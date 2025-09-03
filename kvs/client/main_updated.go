@@ -64,9 +64,8 @@ func route(clients []*Client, key string) *Client {
 	return clients[idx]
 }
 
-func runClient(id int, clients []*Client, done *atomic.Bool, workload *kvs.Workload, resultsCh chan<- uint64) {
+func runClient(id int, clients []*Client, done *atomic.Bool, workload *kvs.Workload, resultsCh chan<- uint64, maxBatch int, linger time.Duration) {
     value := strings.Repeat("x", 128)
-    const maxBatch = 1024 // max ops per RPC when contiguous and to same server
 
     var opsCompleted uint64
 
@@ -80,21 +79,25 @@ func runClient(id int, clients []*Client, done *atomic.Bool, workload *kvs.Workl
 
     var curClient *Client
     var curBatch []kvs.BatchOp
+    if cap(curBatch) < maxBatch {
+        curBatch = make([]kvs.BatchOp, 0, maxBatch)
+    } else {
+        curBatch = curBatch[:0]
+    }
+
+    nextFlushDeadline := time.Now().Add(linger)
 
     for !done.Load() {
         op := workload.Next()
         key := fmt.Sprintf("%d", op.Key)
         dest := route(clients, key)
 
-        // Start/continue a batch for the contiguous destination
+        // If we’re switching shard or batch is full, flush
         if curClient == nil || dest != curClient || len(curBatch) >= maxBatch {
             flush(curClient, curBatch)
             curClient = dest
-            if cap(curBatch) < maxBatch {
-                curBatch = make([]kvs.BatchOp, 0, maxBatch)
-            } else {
-                curBatch = curBatch[:0]
-            }
+            curBatch = curBatch[:0]
+            nextFlushDeadline = time.Now().Add(linger)
         }
 
         if op.IsRead {
@@ -102,10 +105,18 @@ func runClient(id int, clients []*Client, done *atomic.Bool, workload *kvs.Workl
         } else {
             curBatch = append(curBatch, kvs.BatchOp{Key: key, Value: value})
         }
+
+        // Time-based flush to coalesce small bursts and avoid stranded ops
+        if time.Now().After(nextFlushDeadline) {
+            flush(curClient, curBatch)
+            curBatch = curBatch[:0]
+            nextFlushDeadline = time.Now().Add(linger)
+        }
     }
 
+    // final flush on exit
     flush(curClient, curBatch)
-    // fmt.Printf("Client %d finished operations.\n", id)
+	// fmt.Printf("Client %d finished operations.\n", id)
     resultsCh <- opsCompleted
 }
 
@@ -122,6 +133,8 @@ func (h *HostList) Set(value string) error {
 func main() {
 	var hosts HostList
 	theta := flag.Float64("theta", 0.99, "Zipfian distribution skew parameter")
+	batch := flag.Int("batch", 8, "max ops per batch RPC")
+	lingerMs := flag.Int("linger_ms", 2, "linger time to coalesce partial batches (ms)")
 	workloadName := flag.String("workload", "YCSB-B", "Workload type (YCSB-A, YCSB-B, YCSB-C)")
 	secs := flag.Int("secs", 30, "Duration seconds")
 	threads := flag.Int("threads", 256, "workload generators in this process")
@@ -151,7 +164,7 @@ func main() {
 		for i := 0; i < *threads; i++ {
 			go func(clientId int, client *Client) {
 				wl := kvs.NewWorkload(*workloadName, *theta)
-				runClient(clientId, clients, &done, wl, resultsCh)
+				runClient(clientId, clients, &done, wl, resultsCh, *batch, time.Duration(*lingerMs)*time.Millisecond)
 			}(i, c)
 		}
 	}
