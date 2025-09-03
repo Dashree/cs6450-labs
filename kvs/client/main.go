@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net/rpc"
-	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -53,7 +53,18 @@ func (client *Client) Put(key string, value string) {
 	}
 }
 
-func runClient(id int, addr string, done *atomic.Bool, workload *kvs.Workload, resultsCh chan<- uint64) {
+type operationCount struct {
+	mu  sync.Mutex
+	sum uint64
+}
+
+func (c *operationCount) incrementer(ops uint64) {
+	c.mu.Lock()
+	c.sum = c.sum + ops
+	c.mu.Unlock()
+}
+
+func runClient(opsCount *operationCount, id int, addr string, done *atomic.Bool, workload *kvs.Workload, resultsCh chan<- uint64) {
 	client := Dial(addr)
 
 	value := strings.Repeat("x", 128)
@@ -82,11 +93,12 @@ func runClient(id int, addr string, done *atomic.Bool, workload *kvs.Workload, r
 			}
 			opsCompleted++
 		}
+		client.Get(reqBatch)
 	}
 
 	fmt.Printf("Client %d finished operations.\n", id)
 
-	resultsCh <- opsCompleted
+	opsCount.incrementer(batchSize)
 }
 
 type HostList []string
@@ -107,6 +119,8 @@ func main() {
 	theta := flag.Float64("theta", 0.99, "Zipfian distribution skew parameter")
 	workload := flag.String("workload", "YCSB-B", "Workload type (YCSB-A, YCSB-B, YCSB-C)")
 	secs := flag.Int("secs", 30, "Duration in seconds for each client to run")
+	clientID := flag.Int("clientid", -1, "Relative client ID starting at 0")
+
 	flag.Parse()
 
 	if len(hosts) == 0 {
@@ -126,28 +140,30 @@ func main() {
 	done := atomic.Bool{}
 	resultsCh := make(chan uint64)
 
-	numAvailCPUs := runtime.NumCPU()
+	var opsCounter = operationCount{sum: 0}
 
-	for i := 0; i < numAvailCPUs; i++ {
-		for clientId := 0; clientId < len(hosts); clientId++ {
-			go func(clientId int) {
-				workload := kvs.NewWorkload(*workload, *theta)
-				runClient(clientId, hosts[clientId], &done, workload, resultsCh)
-			}(clientId)
-		}
+	var wg sync.WaitGroup
+
+	var numberOfHosts = 1
+	var numberOfClientsPerHost = 32
+	wg.Add(numberOfHosts * numberOfClientsPerHost)
+	host := hosts[*clientID]
+	for j := 0; j < numberOfClientsPerHost; j++ {
+		go func(clientId int) {
+			workload := kvs.NewWorkload(*workload, *theta)
+			runClient(&opsCounter, clientId, host, &done, workload, resultsCh)
+			wg.Done()
+		}(*clientID)
 	}
 
 	time.Sleep(time.Duration(*secs) * time.Second)
 	done.Store(true)
 
-	var tltOpsCompleted uint64 = 0
-	for clientId := 0; clientId < len(hosts); clientId++ {
-		//opsCompleted = <-resultsCh
-		tltOpsCompleted += <-resultsCh
-	}
+	wg.Wait()
+	opsCompleted := opsCounter.sum
 
 	elapsed := time.Since(start)
 
-	opsPerSec := float64(tltOpsCompleted) / elapsed.Seconds()
+	opsPerSec := float64(opsCompleted) / elapsed.Seconds()
 	fmt.Printf("throughput %.2f ops/s\n", opsPerSec)
 }
