@@ -14,7 +14,7 @@ import (
 	"github.com/rstutsman/cs6450-labs/kvs"
 )
 
-const numShards = 16
+const numShards = 32
 
 type Stats struct {
 	puts uint64
@@ -69,7 +69,7 @@ func NewKVService() *KVService {
 
 func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) error {
 	kv.muStatsGets.Lock()
-	kv.stats.gets++
+	kv.stats.gets += uint64(len(request.Key))
 	kv.muStatsGets.Unlock()
 	var resBatch []string
 
