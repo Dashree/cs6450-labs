@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/rpc"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -126,7 +127,7 @@ func main() {
 	resultsCh := make(chan uint64)
 	tltOpsCompleted := uint64(0)
 
-	var numberOfClientsPerHost = 32
+	var numberOfClientsPerHost = runtime.NumCPU() * 4
 	for _, host := range hosts {
 		for j := 0; j < numberOfClientsPerHost; j++ {
 			go func(clientId int) {
