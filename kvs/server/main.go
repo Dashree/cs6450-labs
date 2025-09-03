@@ -14,7 +14,7 @@ import (
 	"github.com/rstutsman/cs6450-labs/kvs"
 )
 
-const numShards = 32
+const numShards = 64
 
 type Stats struct {
 	puts uint64

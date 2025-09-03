@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"runtime"
 
 	"github.com/rstutsman/cs6450-labs/kvs"
 )
@@ -145,7 +146,7 @@ func main() {
 	var wg sync.WaitGroup
 
 	var numberOfHosts = 1
-	var numberOfClientsPerHost = 32
+	var numberOfClientsPerHost = runtime.NumCPU()*2
 	wg.Add(numberOfHosts * numberOfClientsPerHost)
 	host := hosts[*clientID]
 	for j := 0; j < numberOfClientsPerHost; j++ {
