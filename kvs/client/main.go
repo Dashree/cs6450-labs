@@ -66,7 +66,7 @@ func runClient(opsCount *operationCount, id int, addr string, done *atomic.Bool,
 	client := Dial(addr)
 
 	value := strings.Repeat("x", 128)
-	const batchSize = 100
+	const batchSize = 8
 
 	opsCompleted := uint64(0)
 
@@ -112,7 +112,10 @@ func main() {
 	theta := flag.Float64("theta", 0.99, "Zipfian distribution skew parameter")
 	workload := flag.String("workload", "YCSB-B", "Workload type (YCSB-A, YCSB-B, YCSB-C)")
 	secs := flag.Int("secs", 30, "Duration in seconds for each client to run")
+	clientID := flag.Int("clientid", -1, "Relative client ID starting at 0")
 	flag.Parse()
+
+	fmt.Printf("Relative client ID: %d\n", *clientID)
 
 	if len(hosts) == 0 {
 		hosts = append(hosts, "localhost:8080")
@@ -133,20 +136,17 @@ func main() {
 	var opsCounter = operationCount{sum: 0}
 
 	var wg sync.WaitGroup
-	clientId := 0
-	var numberOfHosts = 1
-	var numberOfClientsPerHost = 16
-	wg.Add(numberOfHosts * numberOfClientsPerHost)
-	for i := 0; i < numberOfHosts; i++ {
-		host := hosts[i]
-		for j := 0; j < numberOfClientsPerHost; j++ {
-			go func(clientId int) {
-				workload := kvs.NewWorkload(*workload, *theta)
-				runClient(&opsCounter, clientId, host, &done, workload, resultsCh)
-				wg.Done()
-			}(clientId)
 
-		}
+	var numberOfHosts = 1
+	var numberOfClientsPerHost = 32
+	wg.Add(numberOfHosts * numberOfClientsPerHost)
+	host := hosts[*clientID]
+	for j := 0; j < numberOfClientsPerHost; j++ {
+		go func(clientId int) {
+			workload := kvs.NewWorkload(*workload, *theta)
+			runClient(&opsCounter, clientId, host, &done, workload, resultsCh)
+			wg.Done()
+		}(*clientID)
 	}
 
 	time.Sleep(time.Duration(*secs) * time.Second)

@@ -23,6 +23,9 @@ usage() {
     exit 1
 }
 
+
+
+
 # Check for help options
 for arg in "$@"; do
     case "$arg" in
@@ -174,14 +177,22 @@ for node in "${SERVER_NODES[@]}"; do
     fi
 done
 
+
 CLIENT_PIDS=()
+client_idx=0   # relative ID counter
+
 for node in "${CLIENT_NODES[@]}"; do
-    echo "Starting client on $node..."
-    # Use a marker in the command line to make it easier to identify and wait for
+    echo "Starting client $client_idx on $node..."
     CLIENT_MARKER="kvsclient-run-$TS-$node"
-    ${SSH} $node "exec -a '$CLIENT_MARKER' ${ROOT}/bin/kvsclient -hosts $SERVER_HOSTS $CLIENT_ARGS > \"$LOG_DIR/kvsclient-$node.log\" 2>&1" &
+
+    ${SSH} $node "exec -a '$CLIENT_MARKER' \
+        ${ROOT}/bin/kvsclient -hosts $SERVER_HOSTS -clientid $client_idx $CLIENT_ARGS \
+        > \"$LOG_DIR/kvsclient-$node.log\" 2>&1" &
+
     CLIENT_PIDS+=($!)
+    client_idx=$((client_idx+1))
 done
+
 
 echo "Waiting for clients to finish..."
 # Wait for all client SSH sessions to complete
