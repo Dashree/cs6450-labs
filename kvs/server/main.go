@@ -29,7 +29,8 @@ func (s *Stats) Sub(prev *Stats) Stats {
 }
 
 type Shard struct {
-	mp sync.Map
+	muShard sync.RWMutex
+	mp      map[string]string
 }
 
 type ShardMap struct {
@@ -40,7 +41,9 @@ type ShardMap struct {
 func NewShardedMap() *ShardMap {
 	m := &ShardMap{}
 	for i := 0; i < numShards; i++ {
-		m.shards[i] = &Shard{}
+		m.shards[i] = &Shard{
+			mp: make(map[string]string, 1_000_000),
+		}
 	}
 	return m
 }
@@ -73,15 +76,19 @@ func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) err
 	kv.muStatsGets.Unlock()
 	var resBatch []string
 
+	resValue := ""
 	for _, key := range request.Key {
+		resValue = ""
 		idx := getShardIndex(key)
 		sh := kv.shardmp.shards[idx]
-		val, found := sh.mp.Load(key)
-		if val, ok := val.(string); ok && found {
-			resBatch = append(resBatch, val)
-		} else {
-			resBatch = append(resBatch, "")
+		sh.muShard.RLock()
+		val, found := sh.mp[key]
+		sh.muShard.RUnlock()
+		if found {
+			resValue = val
 		}
+		resBatch = append(resBatch, resValue)
+
 	}
 	response.Value = resBatch
 
@@ -95,7 +102,9 @@ func (kv *KVService) Put(request *kvs.PutRequest, response *kvs.PutResponse) err
 
 	idx := getShardIndex(request.Key)
 	sh := kv.shardmp.shards[idx]
-	sh.mp.Store(request.Key, request.Value)
+	sh.muShard.Lock()
+	sh.mp[request.Key] = request.Value
+	sh.muShard.Unlock()
 
 	return nil
 }
