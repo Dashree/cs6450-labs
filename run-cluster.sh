@@ -161,7 +161,7 @@ for node in "${SERVER_NODES[@]}"; do
 done
 
 # Give servers time to start
-sleep 2
+sleep 10
 
 # Start clients with a unique marker for identification
 # Build comma-separated list of server hosts with port 8080
