@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"net/rpc"
 	"runtime"
@@ -15,6 +16,13 @@ import (
 
 var reqBatchsize uint32
 var workloadsPerHost uint32
+
+func getHostForKey(key string, numHosts int) int {
+	h := fnv.New64a()
+	h.Write([]byte(key))
+	keyHash := h.Sum64()
+	return int(keyHash) % numHosts
+}
 
 type Client struct {
 	rpcClient *rpc.Client
@@ -54,35 +62,46 @@ func (client *Client) Put(key string, value string) {
 	}
 }
 
-func runClient(id int, addr string, done *atomic.Bool, workload *kvs.Workload, resultsCh chan<- uint64) {
-	client := Dial(addr)
+func runClient(id int, addrs []string, done *atomic.Bool, workload *kvs.Workload, resultsCh chan<- uint64) {
+	clients := []*Client{}
+	numHosts := len(addrs)
+	for _, addr := range addrs {
+		clients = append(clients, Dial(addr))
+	}
 
 	value := strings.Repeat("x", 128)
 	const batchSize = 1024
 
 	opsCompleted := uint64(0)
-	var reqBatch []string
+	reqBatch := make([][]string, numHosts)
 
 	for !done.Load() {
 		for j := 0; j < batchSize; j++ {
 			op := workload.Next()
 			key := fmt.Sprintf("%d", op.Key)
+			kHost := getHostForKey(key, numHosts)
 			if op.IsRead {
-				reqBatch = append(reqBatch, key)
-				if len(reqBatch) >= int(reqBatchsize) {
-					client.Get(reqBatch)
-					reqBatch = nil
+				reqBatch[kHost] = append(reqBatch[kHost], key)
+
+				for idx := range addrs {
+					if len(reqBatch[idx]) >= int(reqBatchsize) {
+						clients[idx].Get(reqBatch[idx])
+						reqBatch = nil
+					}
 				}
+
 			} else {
-				if len(reqBatch) > 0 {
-					client.Get(reqBatch)
+				if len(reqBatch[kHost]) > 0 {
+					clients[kHost].Get(reqBatch[kHost])
 					reqBatch = nil
 				}
-				client.Put(key, value)
+				clients[kHost].Put(key, value)
 			}
 			opsCompleted++
 		}
-		client.Get(reqBatch)
+		for idx := range addrs {
+			clients[idx].Get(reqBatch[idx])
+		}
 	}
 	resultsCh <- opsCompleted
 
@@ -131,13 +150,11 @@ func main() {
 	tltOpsCompleted := uint64(0)
 
 	var numberOfClientsPerHost = runtime.NumCPU() * int(workloadsPerHost)
-	for _, host := range hosts {
-		for j := 0; j < numberOfClientsPerHost; j++ {
-			go func(clientId int) {
-				workload := kvs.NewWorkload(*workload, *theta)
-				runClient(clientId, host, &done, workload, resultsCh)
-			}(*clientID)
-		}
+	for j := 0; j < numberOfClientsPerHost; j++ {
+		go func(clientId int) {
+			workload := kvs.NewWorkload(*workload, *theta)
+			runClient(clientId, hosts, &done, workload, resultsCh)
+		}(*clientID)
 	}
 
 	time.Sleep(time.Duration(*secs) * time.Second)
