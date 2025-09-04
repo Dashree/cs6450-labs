@@ -13,7 +13,7 @@ import (
 	"github.com/rstutsman/cs6450-labs/kvs"
 )
 
-const reqBatchsize = 8
+var reqBatchsize uint32
 
 type Client struct {
 	rpcClient *rpc.Client
@@ -68,7 +68,7 @@ func runClient(id int, addr string, done *atomic.Bool, workload *kvs.Workload, r
 			key := fmt.Sprintf("%d", op.Key)
 			if op.IsRead {
 				reqBatch = append(reqBatch, key)
-				if len(reqBatch) >= reqBatchsize {
+				if len(reqBatch) >= int(reqBatchsize) {
 					client.Get(reqBatch)
 					reqBatch = nil
 				}
@@ -106,6 +106,7 @@ func main() {
 	workload := flag.String("workload", "YCSB-B", "Workload type (YCSB-A, YCSB-B, YCSB-C)")
 	secs := flag.Int("secs", 30, "Duration in seconds for each client to run")
 	clientID := flag.Int("clientid", -1, "Relative client ID starting at 0")
+	reqBatchsize = uint32(*flag.Uint64("batch-size", 8, "Batch for Get Requests"))
 
 	flag.Parse()
 
