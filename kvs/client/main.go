@@ -14,6 +14,7 @@ import (
 )
 
 var reqBatchsize uint32
+var workloadsPerHost uint32
 
 type Client struct {
 	rpcClient *rpc.Client
@@ -107,6 +108,7 @@ func main() {
 	secs := flag.Int("secs", 30, "Duration in seconds for each client to run")
 	clientID := flag.Int("clientid", -1, "Relative client ID starting at 0")
 	reqBatchsize = uint32(*flag.Uint64("batch-size", 8, "Batch for Get Requests"))
+	workloadsPerHost = uint32(*flag.Uint64("thrds-per-host", 8, "Number of go routines per hosts"))
 
 	flag.Parse()
 
@@ -128,7 +130,7 @@ func main() {
 	resultsCh := make(chan uint64)
 	tltOpsCompleted := uint64(0)
 
-	var numberOfClientsPerHost = runtime.NumCPU() * 4
+	var numberOfClientsPerHost = runtime.NumCPU() * int(workloadsPerHost)
 	for _, host := range hosts {
 		for j := 0; j < numberOfClientsPerHost; j++ {
 			go func(clientId int) {
