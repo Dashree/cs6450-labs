@@ -14,7 +14,7 @@ import (
 	"github.com/rstutsman/cs6450-labs/kvs"
 )
 
-const numShards = 64
+var numShards uint32
 
 type Stats struct {
 	puts uint64
@@ -34,15 +34,15 @@ type Shard struct {
 }
 
 type ShardMap struct {
-	shards [numShards]*Shard
+	shards map[uint32]*Shard
 }
 
 // Constructor
-func NewShardedMap() *ShardMap {
-	m := &ShardMap{}
-	for i := 0; i < numShards; i++ {
+func NewShardedMap(shardCount uint32, mapAllocCount uint64) *ShardMap {
+	m := &ShardMap{shards: make(map[uint32]*Shard, shardCount)}
+	for i := uint32(0); i < shardCount; i++ {
 		m.shards[i] = &Shard{
-			mp: make(map[string]string, 1_000_000),
+			mp: make(map[string]string, mapAllocCount),
 		}
 	}
 	return m
@@ -63,9 +63,9 @@ type KVService struct {
 	lastPrint   time.Time
 }
 
-func NewKVService() *KVService {
+func NewKVService(shardCount uint32, mapAllocCount uint64) *KVService {
 	kvs := &KVService{}
-	kvs.shardmp = NewShardedMap()
+	kvs.shardmp = NewShardedMap(shardCount, mapAllocCount)
 	kvs.lastPrint = time.Now()
 	return kvs
 }
@@ -132,9 +132,12 @@ func (kv *KVService) printStats() {
 
 func main() {
 	port := flag.String("port", "8080", "Port to run the server on")
+	shardCount := *flag.Int("num-shards", 64, "Number of Shards in the KVStore")
+	mapAllocCount := *flag.Uint64("alloc", 400_000, "Number expected for keys per shard")
 	flag.Parse()
+	numShards = uint32(shardCount)
 
-	kvs := NewKVService()
+	kvs := NewKVService(numShards, mapAllocCount)
 	rpc.Register(kvs)
 	rpc.HandleHTTP()
 
