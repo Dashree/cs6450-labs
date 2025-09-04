@@ -13,7 +13,7 @@ import (
 	"github.com/rstutsman/cs6450-labs/kvs"
 )
 
-const reqBatchsize = 8
+const reqBatchsize = 16
 
 type Client struct {
 	rpcClient *rpc.Client
