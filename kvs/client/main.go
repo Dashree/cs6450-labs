@@ -3,7 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
-	"hash/fnv"
+	"hash/maphash"
 	"log"
 	"net/rpc"
 	"runtime"
@@ -18,10 +18,12 @@ var reqBatchsize uint32
 var workloadsPerHost uint32
 
 func getHostForKey(key string, numHosts int) int {
-	h := fnv.New64a()
-	h.Write([]byte(key))
-	keyHash := h.Sum64()
-	return int(keyHash) % numHosts
+	if numHosts <= 0 {
+		panic("n must be > 0")
+	}
+	var h maphash.Hash
+	h.WriteString(key)
+	return int(h.Sum64() % uint64(numHosts))
 }
 
 type Client struct {
@@ -86,14 +88,14 @@ func runClient(id int, addrs []string, done *atomic.Bool, workload *kvs.Workload
 				for idx := range addrs {
 					if len(reqBatch[idx]) >= int(reqBatchsize) {
 						clients[idx].Get(reqBatch[idx])
-						reqBatch = nil
+						reqBatch[idx] = nil
 					}
 				}
 
 			} else {
 				if len(reqBatch[kHost]) > 0 {
 					clients[kHost].Get(reqBatch[kHost])
-					reqBatch = nil
+					reqBatch[kHost] = nil
 				}
 				clients[kHost].Put(key, value)
 			}
@@ -101,6 +103,7 @@ func runClient(id int, addrs []string, done *atomic.Bool, workload *kvs.Workload
 		}
 		for idx := range addrs {
 			clients[idx].Get(reqBatch[idx])
+			reqBatch[idx] = nil
 		}
 	}
 	resultsCh <- opsCompleted
@@ -160,7 +163,7 @@ func main() {
 	time.Sleep(time.Duration(*secs) * time.Second)
 	done.Store(true)
 
-	totalWorkloads := len(hosts) * numberOfClientsPerHost
+	totalWorkloads := numberOfClientsPerHost
 	for i := 0; i < totalWorkloads; i++ {
 		tltOpsCompleted += <-resultsCh
 	}
