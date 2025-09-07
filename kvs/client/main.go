@@ -20,7 +20,7 @@ var numHosts uint64
 var workloadsPerHost uint32
 
 type KeyHash struct {
-	shardIdx uint64
+	shardIdx int
 	keyHash  uint64
 }
 type CacheKeyHasher struct {
@@ -43,8 +43,9 @@ func (c *CacheKeyHasher) getShardIndex(k string) *KeyHash {
 	} else {
 		h := fnv.New64a()
 		h.Write([]byte(k))
-		keyHash := h.Sum64()
-		kHash := &KeyHash{shardIdx: uint64(keyHash % numHosts), keyHash: keyHash}
+		khashVal := h.Sum64()
+		idx := int(khashVal % uint64(numHosts))
+		kHash := &KeyHash{shardIdx: idx, keyHash: khashVal}
 		c.muCache.Lock()
 		c.cache[k] = kHash
 		c.muCache.Unlock()
@@ -99,7 +100,6 @@ func (client *Client) Put(key uint64, value string) {
 
 func runClient(id int, addrs []string, done *atomic.Bool, workload *kvs.Workload, resultsCh chan<- uint64) {
 	clients := []*Client{}
-	numHosts := len(addrs)
 	for _, addr := range addrs {
 		clients = append(clients, Dial(addr))
 	}
@@ -115,6 +115,7 @@ func runClient(id int, addrs []string, done *atomic.Bool, workload *kvs.Workload
 			op := workload.Next()
 			key := fmt.Sprintf("%d", op.Key)
 			kHost := getShardIndexCached(key)
+
 			if op.IsRead {
 				reqBatch[kHost.shardIdx] = append(reqBatch[kHost.shardIdx], kHost.keyHash)
 
@@ -125,7 +126,7 @@ func runClient(id int, addrs []string, done *atomic.Bool, workload *kvs.Workload
 
 			} else {
 				if len(reqBatch[kHost.shardIdx]) > 0 {
-					clients[kHost.shardIdx].Get(reqBatch[kHost.keyHash])
+					clients[kHost.shardIdx].Get(reqBatch[kHost.shardIdx])
 					reqBatch[kHost.shardIdx] = nil
 				}
 				clients[kHost.shardIdx].Put(kHost.keyHash, value)
