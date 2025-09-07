@@ -3,11 +3,12 @@ package main
 import (
 	"flag"
 	"fmt"
-	"hash/maphash"
+	"hash/fnv"
 	"log"
 	"net/rpc"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -15,15 +16,47 @@ import (
 )
 
 var reqBatchsize uint32
+var numHosts uint64
 var workloadsPerHost uint32
 
-func getHostForKey(key string, numHosts int) int {
-	if numHosts <= 0 {
-		panic("n must be > 0")
+type KeyHash struct {
+	shardIdx uint64
+	keyHash  uint64
+}
+type CacheKeyHasher struct {
+	muCache sync.RWMutex // lock for concurrent access
+	cache   map[string]*KeyHash
+}
+
+func newCache() *CacheKeyHasher {
+	return &CacheKeyHasher{
+		cache: make(map[string]*KeyHash, 100_000),
 	}
-	var h maphash.Hash
-	h.WriteString(key)
-	return int(h.Sum64() % uint64(numHosts))
+}
+
+func (c *CacheKeyHasher) getShardIndex(k string) *KeyHash {
+	c.muCache.RLock()
+	kHash, found := c.cache[k]
+	c.muCache.RUnlock()
+	if found {
+		return kHash
+	} else {
+		h := fnv.New64a()
+		h.Write([]byte(k))
+		keyHash := h.Sum64()
+		kHash := &KeyHash{shardIdx: uint64(keyHash % numHosts), keyHash: keyHash}
+		c.muCache.Lock()
+		c.cache[k] = kHash
+		c.muCache.Unlock()
+		return kHash
+	}
+
+}
+
+var keyHasherCache = newCache()
+
+func getShardIndexCached(k string) *KeyHash {
+	return keyHasherCache.getShardIndex(k)
 }
 
 type Client struct {
@@ -39,7 +72,7 @@ func Dial(addr string) *Client {
 	return &Client{rpcClient}
 }
 
-func (client *Client) Get(key []string) []string {
+func (client *Client) Get(key []uint64) []string {
 	request := kvs.GetRequest{
 		Key: key,
 	}
@@ -52,7 +85,7 @@ func (client *Client) Get(key []string) []string {
 	return response.Value
 }
 
-func (client *Client) Put(key string, value string) {
+func (client *Client) Put(key uint64, value string) {
 	request := kvs.PutRequest{
 		Key:   key,
 		Value: value,
@@ -75,29 +108,27 @@ func runClient(id int, addrs []string, done *atomic.Bool, workload *kvs.Workload
 	const batchSize = 1024
 
 	opsCompleted := uint64(0)
-	reqBatch := make([][]string, numHosts)
+	reqBatch := make([][]uint64, numHosts)
 
 	for !done.Load() {
 		for j := 0; j < batchSize; j++ {
 			op := workload.Next()
 			key := fmt.Sprintf("%d", op.Key)
-			kHost := getHostForKey(key, numHosts)
+			kHost := getShardIndexCached(key)
 			if op.IsRead {
-				reqBatch[kHost] = append(reqBatch[kHost], key)
+				reqBatch[kHost.shardIdx] = append(reqBatch[kHost.shardIdx], kHost.keyHash)
 
-				for idx := range addrs {
-					if len(reqBatch[idx]) >= int(reqBatchsize) {
-						clients[idx].Get(reqBatch[idx])
-						reqBatch[idx] = nil
-					}
+				if len(reqBatch[kHost.shardIdx]) >= int(reqBatchsize) {
+					clients[kHost.shardIdx].Get(reqBatch[kHost.shardIdx])
+					reqBatch[kHost.shardIdx] = nil
 				}
 
 			} else {
-				if len(reqBatch[kHost]) > 0 {
-					clients[kHost].Get(reqBatch[kHost])
-					reqBatch[kHost] = nil
+				if len(reqBatch[kHost.shardIdx]) > 0 {
+					clients[kHost.shardIdx].Get(reqBatch[kHost.keyHash])
+					reqBatch[kHost.shardIdx] = nil
 				}
-				clients[kHost].Put(key, value)
+				clients[kHost.shardIdx].Put(kHost.keyHash, value)
 			}
 			opsCompleted++
 		}
@@ -134,9 +165,12 @@ func main() {
 
 	flag.Parse()
 
-	if len(hosts) == 0 {
+	if numHosts == 0 {
 		hosts = append(hosts, "localhost:8080")
 	}
+
+	numHosts = uint64(len(hosts))
+	fmt.Println(numHosts)
 
 	fmt.Printf(
 		"hosts %v\n"+

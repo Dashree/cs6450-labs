@@ -1,7 +1,7 @@
 package kvs
 
 type PutRequest struct {
-	Key   string
+	Key   uint64
 	Value string
 }
 
@@ -9,7 +9,7 @@ type PutResponse struct {
 }
 
 type GetRequest struct {
-	Key []string
+	Key []uint64
 }
 
 type GetResponse struct {
