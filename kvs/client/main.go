@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"hash"
 	"hash/fnv"
 	"log"
 	"net/rpc"
@@ -11,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"encoding/binary"
 
 	"github.com/rstutsman/cs6450-labs/kvs"
 )
@@ -23,40 +25,55 @@ type KeyHash struct {
 	shardIdx int
 	keyHash  uint64
 }
+
+
+var hasherPool = sync.Pool{
+	New: func() any {
+		return fnv.New64a()
+	},
+}
+
+// cache keyed by the raw uint64 hash input (not string)
 type CacheKeyHasher struct {
-	muCache sync.RWMutex // lock for concurrent access
-	cache   map[string]*KeyHash
+	cache sync.Map // map[uint64]*KeyHash
 }
 
 func newCache() *CacheKeyHasher {
-	return &CacheKeyHasher{
-		cache: make(map[string]*KeyHash, 100_000),
-	}
+	return &CacheKeyHasher{}
 }
 
-func (c *CacheKeyHasher) getShardIndex(k string) *KeyHash {
-	c.muCache.RLock()
-	kHash, found := c.cache[k]
-	c.muCache.RUnlock()
-	if found {
-		return kHash
-	} else {
-		h := fnv.New64a()
-		h.Write([]byte(k))
-		khashVal := h.Sum64()
-		idx := int(khashVal % uint64(numHosts))
-		kHash := &KeyHash{shardIdx: idx, keyHash: khashVal}
-		c.muCache.Lock()
-		c.cache[k] = kHash
-		c.muCache.Unlock()
-		return kHash
+// getShardIndexCached expects the original numeric key (uint64).
+// It hashes the numeric key bytes (no fmt.Sprintf allocations).
+func (c *CacheKeyHasher) getShardIndex(key uint64) *KeyHash {
+	// Try fast path: compute a small key for cache lookup (we can use the numeric key itself)
+	// If workload.Key is already a unique uint64 ID we can use it as the cache key.
+	if v, ok := c.cache.Load(key); ok {
+		return v.(*KeyHash)
 	}
 
+	// Compute hash using pooled hasher
+	h := hasherPool.Get().(hash.Hash64)
+	h.Reset()
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], key)
+	_, _ = h.Write(buf[:]) // always succeeds
+	khash := h.Sum64()
+	hasherPool.Put(h)
+
+	idx := int(khash % uint64(numHosts))
+	kHash := &KeyHash{shardIdx: idx, keyHash: khash}
+
+	// Use LoadOrStore to avoid races/stamps
+	if actual, loaded := c.cache.LoadOrStore(key, kHash); loaded {
+		// Another goroutine stored it first — use that one
+		return actual.(*KeyHash)
+	}
+	return kHash
 }
 
 var keyHasherCache = newCache()
 
-func getShardIndexCached(k string) *KeyHash {
+func getShardIndexCachedFromUint64(k uint64) *KeyHash {
 	return keyHasherCache.getShardIndex(k)
 }
 
@@ -98,12 +115,7 @@ func (client *Client) Put(key uint64, value string) {
 	}
 }
 
-func runClient(id int, addrs []string, done *atomic.Bool, workload *kvs.Workload, resultsCh chan<- uint64) {
-	clients := []*Client{}
-	for _, addr := range addrs {
-		clients = append(clients, Dial(addr))
-	}
-
+func runClient(id int, clients []*Client, done *atomic.Bool, workload *kvs.Workload, resultsCh chan<- uint64) {
 	value := strings.Repeat("x", 128)
 	const batchSize = 1024
 
@@ -113,8 +125,8 @@ func runClient(id int, addrs []string, done *atomic.Bool, workload *kvs.Workload
 	for !done.Load() {
 		for j := 0; j < batchSize; j++ {
 			op := workload.Next()
-			key := fmt.Sprintf("%d", op.Key)
-			kHost := getShardIndexCached(key)
+			// key := fmt.Sprintf("%d", op.Key)
+			kHost := getShardIndexCachedFromUint64(op.Key)
 
 			if op.IsRead {
 				reqBatch[kHost.shardIdx] = append(reqBatch[kHost.shardIdx], kHost.keyHash)
@@ -133,7 +145,7 @@ func runClient(id int, addrs []string, done *atomic.Bool, workload *kvs.Workload
 			}
 			opsCompleted++
 		}
-		for idx := range addrs {
+		for idx := range clients {
 			clients[idx].Get(reqBatch[idx])
 			reqBatch[idx] = nil
 		}
@@ -166,12 +178,17 @@ func main() {
 
 	flag.Parse()
 
-	if numHosts == 0 {
+	if len(hosts) == 0 {
 		hosts = append(hosts, "localhost:8080")
 	}
 
 	numHosts = uint64(len(hosts))
-	fmt.Println(numHosts)
+
+	// create shared RPC clients once
+	clients := make([]*Client, len(hosts))
+	for i, addr := range hosts {
+		clients[i] = Dial(addr)
+	}
 
 	fmt.Printf(
 		"hosts %v\n"+
@@ -191,7 +208,7 @@ func main() {
 	for j := 0; j < numberOfClientsPerHost; j++ {
 		go func(clientId int) {
 			workload := kvs.NewWorkload(*workload, *theta)
-			runClient(clientId, hosts, &done, workload, resultsCh)
+			runClient(clientId, clients, &done, workload, resultsCh)
 		}(*clientID)
 	}
 

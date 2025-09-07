@@ -158,6 +158,7 @@ echo
 for node in "${SERVER_NODES[@]}"; do
     echo "Starting server on $node..."
     ${SSH} $node "${ROOT}/bin/kvsserver $SERVER_ARGS > \"$LOG_DIR/kvsserver-$node.log\" 2>&1 &"
+    ${SSH} $node "${ROOT}/bin/kvsserver -port 8000 $SERVER_ARGS > \"$LOG_DIR/kvsserver-$node-8000.log\" 2>&1 &"
 done
 
 # Give servers time to start
@@ -169,8 +170,10 @@ SERVER_HOSTS=""
 for node in "${SERVER_NODES[@]}"; do
     if [ -n "$SERVER_HOSTS" ]; then
         SERVER_HOSTS="$SERVER_HOSTS,$node:8080"
+        SERVER_HOSTS="$SERVER_HOSTS,$node:8000"
     else
         SERVER_HOSTS="$node:8080"
+        SERVER_HOSTS="$SERVER_HOSTS,$node:8000"
     fi
 done
 
