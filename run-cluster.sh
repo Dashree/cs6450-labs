@@ -183,7 +183,7 @@ for node in "${CLIENT_NODES[@]}"; do
     echo "Starting client on $node..."
     # Use a marker in the command line to make it easier to identify and wait for
     CLIENT_MARKER="kvsclient-run-$TS-$node"
-    ${SSH} $node "exec -a '$CLIENT_MARKER' ${ROOT}/bin/kvsclient -hosts $SERVER_HOSTS -clientid $client_idx $CLIENT_ARGS > \"$LOG_DIR/kvsclient-$node.log\" 2>&1" &
+    ${SSH} $node "exec -a '$CLIENT_MARKER' ${ROOT}/bin/kvsclient -hosts $SERVER_HOSTS $CLIENT_ARGS > \"$LOG_DIR/kvsclient-$node.log\" 2>&1" &
     CLIENT_PIDS+=($!)
     client_idx=$((client_idx+1))
 done
