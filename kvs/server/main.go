@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"net"
 	"net/http"
@@ -14,6 +15,57 @@ import (
 
 	"github.com/rstutsman/cs6450-labs/kvs"
 )
+
+var numShards uint64
+var enableCache bool
+
+type KeyHash struct {
+	shardIdx uint64
+	keyHash  uint64
+}
+type CacheKeyHasher struct {
+	muCache sync.RWMutex // lock for concurrent access
+	cache   map[string]*KeyHash
+}
+
+func newCache() *CacheKeyHasher {
+	return &CacheKeyHasher{
+		cache: make(map[string]*KeyHash, 100_000),
+	}
+}
+
+func (c *CacheKeyHasher) getShardIndex(k string) *KeyHash {
+	c.muCache.RLock()
+	kHash, found := c.cache[k]
+	c.muCache.RUnlock()
+	if found {
+		return kHash
+	} else {
+		h := fnv.New64a()
+		h.Write([]byte(k))
+		keyHash := h.Sum64()
+		kHash := &KeyHash{shardIdx: uint64(keyHash % numShards), keyHash: keyHash}
+		c.muCache.Lock()
+		c.cache[k] = kHash
+		c.muCache.Unlock()
+		return kHash
+	}
+
+}
+
+var keyHasherCache = newCache()
+
+func getShardIndexCached(k string) *KeyHash {
+	if enableCache {
+		return keyHasherCache.getShardIndex(k)
+	} else {
+		h := fnv.New64a()
+		h.Write([]byte(k))
+		keyHash := h.Sum64()
+		return &KeyHash{(keyHash % numShards), keyHash}
+
+	}
+}
 
 type Stats struct {
 	puts uint64
@@ -27,82 +79,97 @@ func (s *Stats) Sub(prev *Stats) Stats {
 	return r
 }
 
-type hashShard struct {
-	sync.RWMutex
-	mp map[string]string
+type Shard struct {
+	muShard sync.RWMutex
+	mp      map[uint64]string
 }
+
+type ShardMap struct {
+	shards map[uint64]*Shard
+}
+
+// Constructor
+func NewShardedMap(shardCount uint64, mapAllocCount uint64) *ShardMap {
+	m := &ShardMap{shards: make(map[uint64]*Shard, shardCount)}
+	for i := uint64(0); i < shardCount; i++ {
+		m.shards[i] = &Shard{
+			mp: make(map[uint64]string, mapAllocCount),
+		}
+	}
+	return m
+}
+
+// func getShardIndex(key string) (uint64, uint64) {
+
+// }
 
 type KVService struct {
-	shards    [1]hashShard
-	statsLock sync.Mutex
-	stats     Stats
-	prevStats Stats
-	lastPrint time.Time
+	muStatsGets sync.Mutex
+	muStatsPuts sync.Mutex
+	shardmp     *ShardMap
+	stats       Stats
+	prevStats   Stats
+	lastPrint   time.Time
 }
 
-func NewKVService() *KVService {
+func NewKVService(shardCount uint64, mapAllocCount uint64) *KVService {
 	kvs := &KVService{}
-	for i := range kvs.shards {
-		kvs.shards[i] = hashShard{mp: make(map[string]string)}
-	}
+	kvs.shardmp = NewShardedMap(shardCount, mapAllocCount)
 	kvs.lastPrint = time.Now()
 	return kvs
 }
 
-func bucket16(s string) int {
-	//AI helped write this hash function
-	norm := strings.ToLower(strings.TrimSpace(s))
-	sum := sha256.Sum256([]byte(norm))
-	return int(sum[0] & 0x0F)
-}
-
 func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) error {
-	var Values = make([]string, 0)
-	for i := 0; i < len(request.Keys); i++ {
-		Key := request.Keys[i]
-		//id := bucket16(Key)
-		id := 0
+	kv.muStatsGets.Lock()
+	kv.stats.gets += uint64(len(request.Key))
+	kv.muStatsGets.Unlock()
+	var resBatch []string
 
-		kv.shards[id].RLock()
-
-		if value, found := kv.shards[id].mp[Key]; found {
-			Values = append(Values, value)
+	resValue := ""
+	for _, key := range request.Key {
+		resValue = ""
+		kHash := getShardIndexCached(key)
+		sh := kv.shardmp.shards[kHash.shardIdx]
+		sh.muShard.RLock()
+		val, found := sh.mp[kHash.keyHash]
+		sh.muShard.RUnlock()
+		if found {
+			resValue = val
 		}
-		kv.shards[id].RUnlock()
+		resBatch = append(resBatch, resValue)
 
 	}
-	kv.statsLock.Lock()
-	kv.stats.gets += uint64(len(request.Keys))
-	kv.statsLock.Unlock()
-	response.Values = Values
+	response.Value = resBatch
 
 	return nil
 }
 
 func (kv *KVService) Put(request *kvs.PutRequest, response *kvs.PutResponse) error {
-
-	// id := bucket16(request.Key)
-	id := 0
-	kv.shards[id].Lock()
-	defer kv.shards[id].Unlock()
-
-	kv.statsLock.Lock()
+	kv.muStatsPuts.Lock()
 	kv.stats.puts++
-	kv.statsLock.Unlock()
+	kv.muStatsPuts.Unlock()
+
+	kHash := getShardIndexCached(request.Key)
+	sh := kv.shardmp.shards[kHash.shardIdx]
+	sh.muShard.Lock()
+	sh.mp[kHash.keyHash] = request.Value
+	sh.muShard.Unlock()
 
 	kv.shards[id].mp[request.Key] = request.Value
 	return nil
 }
 
 func (kv *KVService) printStats() {
-	kv.statsLock.Lock()
+	kv.muStatsGets.Lock()
+	kv.muStatsPuts.Lock()
 	stats := kv.stats
 	prevStats := kv.prevStats
 	kv.prevStats = stats
 	now := time.Now()
 	lastPrint := kv.lastPrint
 	kv.lastPrint = now
-	kv.statsLock.Unlock()
+	kv.muStatsPuts.Unlock()
+	kv.muStatsGets.Unlock()
 
 	diff := stats.Sub(&prevStats)
 	deltaS := now.Sub(lastPrint).Seconds()
@@ -115,9 +182,12 @@ func (kv *KVService) printStats() {
 
 func main() {
 	port := flag.String("port", "8080", "Port to run the server on")
+	numShards = *flag.Uint64("num-shards", 64, "Number of Shards in the KVStore")
+	mapAllocCount := *flag.Uint64("alloc", 400_000, "Number expected for keys per shard")
+	enableCache = *flag.Bool("cache", false, "Use cached values for string storage")
 	flag.Parse()
 
-	kvs := NewKVService()
+	kvs := NewKVService(numShards, mapAllocCount)
 	rpc.Register(kvs)
 	rpc.HandleHTTP()
 
@@ -126,7 +196,7 @@ func main() {
 		log.Fatal("listen error:", e)
 	}
 
-	fmt.Printf("Starting KVS server on :%s\n", *port)
+	fmt.Printf("Starting KVS server on :%s %t\n", *port, enableCache)
 
 	go func() {
 		for {

@@ -9,9 +9,9 @@ type PutResponse struct {
 }
 
 type GetRequest struct {
-	Keys []string
+	Key []string
 }
 
 type GetResponse struct {
-	Values []string
+	Value []string
 }

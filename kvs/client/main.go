@@ -3,8 +3,10 @@ package main
 import (
 	"flag"
 	"fmt"
+	"hash/maphash"
 	"log"
 	"net/rpc"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +14,18 @@ import (
 
 	"github.com/rstutsman/cs6450-labs/kvs"
 )
+
+var reqBatchsize uint32
+var workloadsPerHost uint32
+
+func getHostForKey(key string, numHosts int) int {
+	if numHosts <= 0 {
+		panic("n must be > 0")
+	}
+	var h maphash.Hash
+	h.WriteString(key)
+	return int(h.Sum64() % uint64(numHosts))
+}
 
 type Client struct {
 	rpcClient *rpc.Client
@@ -26,7 +40,7 @@ func Dial(addr string) *Client {
 	return &Client{rpcClient}
 }
 
-func (client *Client) Get(keys []string) []string {
+func (client *Client) Get(key []string) []string {
 	request := kvs.GetRequest{
 		Keys: keys,
 	}
@@ -51,46 +65,50 @@ func (client *Client) Put(key string, value string) {
 	}
 }
 
-type operationCount struct {
-	mu  sync.Mutex
-	sum uint64
-}
-
-func (c *operationCount) incrementer(ops uint64) {
-	c.mu.Lock()
-	c.sum = c.sum + ops
-	c.mu.Unlock()
-}
-
-func runClient(opsCount *operationCount, id int, addr string, done *atomic.Bool, workload *kvs.Workload, resultsCh chan<- uint64) {
-	client := Dial(addr)
+func runClient(id int, addrs []string, done *atomic.Bool, workload *kvs.Workload, resultsCh chan<- uint64) {
+	clients := []*Client{}
+	numHosts := len(addrs)
+	for _, addr := range addrs {
+		clients = append(clients, Dial(addr))
+	}
 
 	value := strings.Repeat("x", 128)
 	const batchSize = 8
 
 	opsCompleted := uint64(0)
+	reqBatch := make([][]string, numHosts)
 
 	for !done.Load() {
 		var keys = make([]string, 0)
 		for j := 0; j < batchSize; j++ {
 			op := workload.Next()
 			key := fmt.Sprintf("%d", op.Key)
-
+			kHost := getHostForKey(key, numHosts)
 			if op.IsRead {
-				keys = append(keys, key)
+				reqBatch[kHost] = append(reqBatch[kHost], key)
+
+				for idx := range addrs {
+					if len(reqBatch[idx]) >= int(reqBatchsize) {
+						clients[idx].Get(reqBatch[idx])
+						reqBatch[idx] = nil
+					}
+				}
+
 			} else {
-				client.Get(keys)
-				keys = make([]string, 0)
-				client.Put(key, value)
-				break
+				if len(reqBatch[kHost]) > 0 {
+					clients[kHost].Get(reqBatch[kHost])
+					reqBatch[kHost] = nil
+				}
+				clients[kHost].Put(key, value)
 			}
 			opsCompleted++
 		}
-		client.Get(keys)
+		for idx := range addrs {
+			clients[idx].Get(reqBatch[idx])
+			reqBatch[idx] = nil
+		}
 	}
-
-	fmt.Printf("Client %d finished operations.\n", id)
-	opsCount.incrementer(opsCompleted)
+	resultsCh <- opsCompleted
 
 }
 
@@ -113,6 +131,9 @@ func main() {
 	workload := flag.String("workload", "YCSB-B", "Workload type (YCSB-A, YCSB-B, YCSB-C)")
 	secs := flag.Int("secs", 30, "Duration in seconds for each client to run")
 	clientID := flag.Int("clientid", -1, "Relative client ID starting at 0")
+	reqBatchsize = uint32(*flag.Uint64("batch-size", 8, "Batch for Get Requests"))
+	workloadsPerHost = uint32(*flag.Uint64("thrds-per-host", 8, "Number of go routines per hosts"))
+
 	flag.Parse()
 
 	fmt.Printf("Relative client ID: %d\n", *clientID)
@@ -133,30 +154,26 @@ func main() {
 
 	done := atomic.Bool{}
 	resultsCh := make(chan uint64)
-	var opsCounter = operationCount{sum: 0}
+	tltOpsCompleted := uint64(0)
 
-	var wg sync.WaitGroup
-
-	var numberOfHosts = 1
-	var numberOfClientsPerHost = 32
-	wg.Add(numberOfHosts * numberOfClientsPerHost)
-	host := hosts[*clientID]
+	var numberOfClientsPerHost = runtime.NumCPU() * int(workloadsPerHost)
 	for j := 0; j < numberOfClientsPerHost; j++ {
 		go func(clientId int) {
 			workload := kvs.NewWorkload(*workload, *theta)
-			runClient(&opsCounter, clientId, host, &done, workload, resultsCh)
-			wg.Done()
+			runClient(clientId, hosts, &done, workload, resultsCh)
 		}(*clientID)
 	}
 
 	time.Sleep(time.Duration(*secs) * time.Second)
 	done.Store(true)
 
-	wg.Wait()
-	opsCompleted := opsCounter.sum
+	totalWorkloads := numberOfClientsPerHost
+	for i := 0; i < totalWorkloads; i++ {
+		tltOpsCompleted += <-resultsCh
+	}
 
 	elapsed := time.Since(start)
 
-	opsPerSec := float64(opsCompleted) / elapsed.Seconds()
+	opsPerSec := float64(tltOpsCompleted) / elapsed.Seconds()
 	fmt.Printf("throughput %.2f ops/s\n", opsPerSec)
 }

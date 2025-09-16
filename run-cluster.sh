@@ -164,7 +164,7 @@ for node in "${SERVER_NODES[@]}"; do
 done
 
 # Give servers time to start
-sleep 2
+sleep 10
 
 # Start clients with a unique marker for identification
 # Build comma-separated list of server hosts with port 8080
@@ -180,15 +180,10 @@ done
 
 CLIENT_PIDS=()
 client_idx=0   # relative ID counter
-
 for node in "${CLIENT_NODES[@]}"; do
     echo "Starting client $client_idx on $node..."
     CLIENT_MARKER="kvsclient-run-$TS-$node"
-
-    ${SSH} $node "exec -a '$CLIENT_MARKER' \
-        ${ROOT}/bin/kvsclient -hosts $SERVER_HOSTS -clientid $client_idx $CLIENT_ARGS \
-        > \"$LOG_DIR/kvsclient-$node.log\" 2>&1" &
-
+    ${SSH} $node "exec -a '$CLIENT_MARKER' ${ROOT}/bin/kvsclient -hosts $SERVER_HOSTS -clientid $client_idx $CLIENT_ARGS > \"$LOG_DIR/kvsclient-$node.log\" 2>&1" &
     CLIENT_PIDS+=($!)
     client_idx=$((client_idx+1))
 done
