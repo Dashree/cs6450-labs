@@ -8,7 +8,6 @@ import (
 	"net/rpc"
 	"runtime"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -40,17 +39,17 @@ func Dial(addr string) *Client {
 	return &Client{rpcClient}
 }
 
-func (client *Client) Get(key []string) []string {
+func (client *Client) Get(key string) string {
 	request := kvs.GetRequest{
-		Keys: keys,
+		Key: key,
 	}
 	response := kvs.GetResponse{}
 	err := client.rpcClient.Call("KVService.Get", &request, &response)
-
 	if err != nil {
 		log.Fatal(err)
 	}
-	return response.Values
+
+	return response.Value
 }
 
 func (client *Client) Put(key string, value string) {
@@ -73,39 +72,22 @@ func runClient(id int, addrs []string, done *atomic.Bool, workload *kvs.Workload
 	}
 
 	value := strings.Repeat("x", 128)
-	const batchSize = 8
+	const batchSize = 1024
 
 	opsCompleted := uint64(0)
-	reqBatch := make([][]string, numHosts)
 
 	for !done.Load() {
-		var keys = make([]string, 0)
 		for j := 0; j < batchSize; j++ {
 			op := workload.Next()
 			key := fmt.Sprintf("%d", op.Key)
 			kHost := getHostForKey(key, numHosts)
 			if op.IsRead {
-				reqBatch[kHost] = append(reqBatch[kHost], key)
-
-				for idx := range addrs {
-					if len(reqBatch[idx]) >= int(reqBatchsize) {
-						clients[idx].Get(reqBatch[idx])
-						reqBatch[idx] = nil
-					}
-				}
+				clients[kHost].Get(key)
 
 			} else {
-				if len(reqBatch[kHost]) > 0 {
-					clients[kHost].Get(reqBatch[kHost])
-					reqBatch[kHost] = nil
-				}
 				clients[kHost].Put(key, value)
 			}
 			opsCompleted++
-		}
-		for idx := range addrs {
-			clients[idx].Get(reqBatch[idx])
-			reqBatch[idx] = nil
 		}
 	}
 	resultsCh <- opsCompleted
@@ -136,8 +118,6 @@ func main() {
 
 	flag.Parse()
 
-	fmt.Printf("Relative client ID: %d\n", *clientID)
-
 	if len(hosts) == 0 {
 		hosts = append(hosts, "localhost:8080")
 	}
@@ -157,6 +137,7 @@ func main() {
 	tltOpsCompleted := uint64(0)
 
 	var numberOfClientsPerHost = runtime.NumCPU() * int(workloadsPerHost)
+	numberOfClientsPerHost = 1
 	for j := 0; j < numberOfClientsPerHost; j++ {
 		go func(clientId int) {
 			workload := kvs.NewWorkload(*workload, *theta)

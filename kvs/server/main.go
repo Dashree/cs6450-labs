@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
 	"flag"
 	"fmt"
 	"hash/fnv"
@@ -9,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"net/rpc"
-	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +21,7 @@ type KeyHash struct {
 	shardIdx uint64
 	keyHash  uint64
 }
+
 type CacheKeyHasher struct {
 	muCache sync.RWMutex // lock for concurrent access
 	cache   map[string]*KeyHash
@@ -99,10 +98,6 @@ func NewShardedMap(shardCount uint64, mapAllocCount uint64) *ShardMap {
 	return m
 }
 
-// func getShardIndex(key string) (uint64, uint64) {
-
-// }
-
 type KVService struct {
 	muStatsGets sync.Mutex
 	muStatsPuts sync.Mutex
@@ -121,26 +116,19 @@ func NewKVService(shardCount uint64, mapAllocCount uint64) *KVService {
 
 func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) error {
 	kv.muStatsGets.Lock()
-	kv.stats.gets += uint64(len(request.Key))
+	kv.stats.gets++
 	kv.muStatsGets.Unlock()
-	var resBatch []string
 
 	resValue := ""
-	for _, key := range request.Key {
-		resValue = ""
-		kHash := getShardIndexCached(key)
-		sh := kv.shardmp.shards[kHash.shardIdx]
-		sh.muShard.RLock()
-		val, found := sh.mp[kHash.keyHash]
-		sh.muShard.RUnlock()
-		if found {
-			resValue = val
-		}
-		resBatch = append(resBatch, resValue)
-
+	kHash := getShardIndexCached(request.Key)
+	sh := kv.shardmp.shards[kHash.shardIdx]
+	sh.muShard.RLock()
+	val, found := sh.mp[kHash.keyHash]
+	sh.muShard.RUnlock()
+	if found {
+		resValue = val
 	}
-	response.Value = resBatch
-
+	response.Value = resValue
 	return nil
 }
 
@@ -155,7 +143,7 @@ func (kv *KVService) Put(request *kvs.PutRequest, response *kvs.PutResponse) err
 	sh.mp[kHash.keyHash] = request.Value
 	sh.muShard.Unlock()
 
-	kv.shards[id].mp[request.Key] = request.Value
+	// kv.shards[id].mp[request.Key] = request.Value
 	return nil
 }
 
