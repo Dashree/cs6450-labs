@@ -64,6 +64,28 @@ func (client *Client) Put(key string, value string) {
 	}
 }
 
+func (client *Client) Begin() {
+	//creates and enters a transaction.
+	//Generate transaction ID
+	//include Client ID
+	//Keep a structure to track all servers that gets/puts are sent to. since we need to send commit or aborts to them
+	//Track the writeset for the transaction.
+	//This writeset is for when the client calls a get on something they already put
+}
+
+func (client *Client) Commit() {
+	//Contact all servers involved in transaction
+	//server should do all puts that are pending
+	//server should drop all locks
+}
+
+func (client *Client) Abort() {
+	//calling abort is illegal unless a transaction has been entered
+	//Contact all servers involved in transaction
+	//server should discard all puts that are pending
+	//server should drop all locks
+}
+
 func runClient(id int, addrs []string, done *atomic.Bool, workload *kvs.Workload, resultsCh chan<- uint64) {
 	clients := []*Client{}
 	numHosts := len(addrs)
