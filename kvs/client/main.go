@@ -28,7 +28,7 @@ func getHostForKey(key string, numHosts int) int {
 }
 
 type Clients struct {
-	rpcClients []*rpc.Client
+	clients []*Client
 }
 
 type Client struct {
@@ -77,10 +77,12 @@ func (clients *Clients) Begin(clientId int, operations []kvs.TransactionOperatio
 	//server list
 	serverList := []int{}
 	for _, op := range operations {
+		index := getHostForKey(op.Key, len(clients.clients))
+		serverList = append(serverList, index)
 		if op.IsRead {
-			serverList = append(serverList, getHostForKey(op.Key, len(clients.rpcClients)))
+			clients.clients[index].Get(op.Key)
 		} else {
-			serverList = append(serverList, getHostForKey(op.Key, len(clients.rpcClients)))
+			clients.clients[index].Put(op.Key, op.Value)
 		}
 	}
 	//Keep a structure to track all servers that gets/puts are sent to. since we need to send commit or aborts to them
@@ -102,10 +104,10 @@ func (clients *Clients) Abort() {
 }
 
 func runClient(clientId int, addrs []string, done *atomic.Bool, workload *kvs.Workload, resultsCh chan<- uint64) {
-	clients := Clients{rpcClients: []*rpc.Client{}}
+	clients := Clients{clients: []*Client{}}
 	for _, addr := range addrs {
 		client := Dial(addr)
-		clients.rpcClients = append(clients.rpcClients, client.rpcClient)
+		clients.clients = append(clients.clients, client)
 	}
 
 	value := strings.Repeat("x", 128)
