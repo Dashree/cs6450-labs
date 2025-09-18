@@ -44,7 +44,7 @@ func Dial(addr string) *Client {
 	return &Client{rpcClient}
 }
 
-func (client *Client) Get(key string) string {
+func (client *Client) Get(key string) bool {
 	request := kvs.GetRequest{
 		Key: key,
 	}
@@ -54,10 +54,10 @@ func (client *Client) Get(key string) string {
 		log.Fatal(err)
 	}
 
-	return response.Value
+	return response.Yes
 }
 
-func (client *Client) Put(key string, value string) {
+func (client *Client) Put(key string, value string) bool {
 	request := kvs.PutRequest{
 		Key:   key,
 		Value: value,
@@ -67,6 +67,8 @@ func (client *Client) Put(key string, value string) {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	return response.Yes
 }
 
 func (clients *Clients) Begin(clientId int, operations []kvs.TransactionOperation) {
@@ -79,11 +81,21 @@ func (clients *Clients) Begin(clientId int, operations []kvs.TransactionOperatio
 	for _, op := range operations {
 		index := getHostForKey(op.Key, len(clients.clients))
 		serverList = append(serverList, index)
+		var response bool
 		if op.IsRead {
-			clients.clients[index].Get(op.Key)
+			response = clients.clients[index].Get(op.Key)
 		} else {
-			clients.clients[index].Put(op.Key, op.Value)
+			response = clients.clients[index].Put(op.Key, op.Value)
 		}
+		if response == false {
+			clients.Abort()
+			//dont return by retrying the transaction
+			return
+		} else {
+			clients.Commit()
+			return
+		}
+
 	}
 	//Keep a structure to track all servers that gets/puts are sent to. since we need to send commit or aborts to them
 	//Track the writeset for the transaction.

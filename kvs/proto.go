@@ -6,6 +6,7 @@ type PutRequest struct {
 }
 
 type PutResponse struct {
+	Yes bool
 }
 
 type GetRequest struct {
@@ -14,6 +15,7 @@ type GetRequest struct {
 
 type GetResponse struct {
 	Value string
+	Yes   bool
 }
 
 type Commit struct {
