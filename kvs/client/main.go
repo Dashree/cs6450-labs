@@ -77,29 +77,29 @@ func (clients *Clients) Begin(clientId int, operations []kvs.TransactionOperatio
 	transactionId := uuid.New()
 	//include Client ID
 	//server list
-	serverList := []int{}
-	for _, op := range operations {
-		index := getHostForKey(op.Key, len(clients.clients))
-		serverList = append(serverList, index)
-		var response bool
-		if op.IsRead {
-			response = clients.clients[index].Get(op.Key)
-		} else {
-			response = clients.clients[index].Put(op.Key, op.Value)
-		}
-		if response == false {
-			clients.Abort()
-			//dont return by retrying the transaction
-			return
-		} else {
-			clients.Commit()
-			return
-		}
-
-	}
 	//Keep a structure to track all servers that gets/puts are sent to. since we need to send commit or aborts to them
 	//Track the writeset for the transaction.
 	//This writeset is for when the client calls a get on something they already put
+	for {
+		serverList := []int{} //keeps track of index into clients.clients
+		for _, op := range operations {
+			index := getHostForKey(op.Key, len(clients.clients))
+			serverList = append(serverList, index)
+			var response bool
+			if op.IsRead {
+				response = clients.clients[index].Get(op.Key)
+			} else {
+				response = clients.clients[index].Put(op.Key, op.Value)
+			}
+			if response == false {
+				clients.Abort()
+				continue
+			}
+		}
+		clients.Commit()
+		break
+	}
+	return
 }
 
 func (clients *Clients) Commit() {
