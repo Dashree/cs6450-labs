@@ -91,28 +91,49 @@ func (clients *Clients) Begin(clientId int, operations []kvs.TransactionOperatio
 			} else {
 				response = clients.clients[index].Put(op.Key, op.Value)
 			}
-			if response == false {
-				clients.Abort()
+			if !response {
+				clients.Abort(transactionId, serverList)
 				continue
 			}
 		}
-		clients.Commit()
+		clients.Commit(transactionId, serverList)
 		break
 	}
-	return
 }
 
-func (clients *Clients) Commit() {
+func (clients *Clients) Commit(transactionId uuid.UUID, serverList []int) {
 	//Contact all servers involved in transaction
 	//server should do all puts that are pending
 	//server should drop all locks
+	for _, serverIdx := range serverList {
+		request := kvs.CommitRequest{
+			TransactionId: transactionId.ID(),
+		}
+		response := kvs.CommitResponse{}
+		err := clients.clients[serverIdx].rpcClient.Call("KVService.Commit", &request, &response)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+	}
 }
 
-func (clients *Clients) Abort() {
+func (clients *Clients) Abort(transactionId uuid.UUID, serverList []int) {
 	//calling abort is illegal unless a transaction has been entered
 	//Contact all servers involved in transaction
 	//server should discard all puts that are pending
 	//server should drop all locks
+	for _, serverIdx := range serverList {
+		request := kvs.AbortRequest{
+			TransactionId: transactionId.ID(),
+		}
+		response := kvs.AbortResponse{}
+		err := clients.clients[serverIdx].rpcClient.Call("KVService.Abort", &request, &response)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+	}
 }
 
 func runClient(clientId int, addrs []string, done *atomic.Bool, workload *kvs.Workload, resultsCh chan<- uint64) {

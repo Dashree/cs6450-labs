@@ -18,18 +18,20 @@ type GetResponse struct {
 	Yes   bool
 }
 
-type Commit struct {
-	transactionID uint64
+type CommitRequest struct {
+	TransactionId uint32
 }
 
 type CommitResponse struct {
+	Ack bool
 }
 
-type Abort struct {
-	transactionID uint64
+type AbortRequest struct {
+	TransactionId uint32
 }
 
 type AbortResponse struct {
+	Ack bool
 }
 
 type TransactionOperation struct {
