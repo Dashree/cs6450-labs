@@ -147,6 +147,14 @@ func (kv *KVService) Put(request *kvs.PutRequest, response *kvs.PutResponse) err
 	return nil
 }
 
+func (kv *KVService) Commit(request *kvs.Commit, response *kvs.CommitResponse) error {
+	return nil
+}
+
+func (kv *KVService) Abort(request *kvs.Abort, response *kvs.AbortResponse) error {
+	return nil
+}
+
 func (kv *KVService) printStats() {
 	kv.muStatsGets.Lock()
 	kv.muStatsPuts.Lock()

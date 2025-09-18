@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rstutsman/cs6450-labs/kvs"
 )
 
@@ -24,6 +25,10 @@ func getHostForKey(key string, numHosts int) int {
 	var h maphash.Hash
 	h.WriteString(key)
 	return int(h.Sum64() % uint64(numHosts))
+}
+
+type Clients struct {
+	rpcClients []*rpc.Client
 }
 
 type Client struct {
@@ -64,33 +69,43 @@ func (client *Client) Put(key string, value string) {
 	}
 }
 
-func (client *Client) Begin() {
+func (clients *Clients) Begin(clientId int, operations []kvs.TransactionOperation) {
 	//creates and enters a transaction.
 	//Generate transaction ID
+	transactionId := uuid.New()
 	//include Client ID
+	//server list
+	serverList := []int{}
+	for _, op := range operations {
+		if op.IsRead {
+			serverList = append(serverList, getHostForKey(op.Key, len(clients.rpcClients)))
+		} else {
+			serverList = append(serverList, getHostForKey(op.Key, len(clients.rpcClients)))
+		}
+	}
 	//Keep a structure to track all servers that gets/puts are sent to. since we need to send commit or aborts to them
 	//Track the writeset for the transaction.
 	//This writeset is for when the client calls a get on something they already put
 }
 
-func (client *Client) Commit() {
+func (clients *Clients) Commit() {
 	//Contact all servers involved in transaction
 	//server should do all puts that are pending
 	//server should drop all locks
 }
 
-func (client *Client) Abort() {
+func (clients *Clients) Abort() {
 	//calling abort is illegal unless a transaction has been entered
 	//Contact all servers involved in transaction
 	//server should discard all puts that are pending
 	//server should drop all locks
 }
 
-func runClient(id int, addrs []string, done *atomic.Bool, workload *kvs.Workload, resultsCh chan<- uint64) {
-	clients := []*Client{}
-	numHosts := len(addrs)
+func runClient(clientId int, addrs []string, done *atomic.Bool, workload *kvs.Workload, resultsCh chan<- uint64) {
+	clients := Clients{rpcClients: []*rpc.Client{}}
 	for _, addr := range addrs {
-		clients = append(clients, Dial(addr))
+		client := Dial(addr)
+		clients.rpcClients = append(clients.rpcClients, client.rpcClient)
 	}
 
 	value := strings.Repeat("x", 128)
@@ -100,16 +115,14 @@ func runClient(id int, addrs []string, done *atomic.Bool, workload *kvs.Workload
 
 	for !done.Load() {
 		for j := 0; j < batchSize; j++ {
-			op := workload.Next()
-			key := fmt.Sprintf("%d", op.Key)
-			kHost := getHostForKey(key, numHosts)
-			if op.IsRead {
-				clients[kHost].Get(key)
-
-			} else {
-				clients[kHost].Put(key, value)
+			var transactionOps []kvs.TransactionOperation
+			for i := 0; i < 3; i++ {
+				op := workload.Next()
+				key := fmt.Sprintf("%d", op.Key)
+				transactionOps = append(transactionOps, kvs.TransactionOperation{IsRead: op.IsRead, Key: key, Value: value})
 			}
-			opsCompleted++
+			//Begin Transaction
+			clients.Begin(clientId, transactionOps)
 		}
 	}
 	resultsCh <- opsCompleted
