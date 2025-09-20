@@ -1,3 +1,4 @@
+//client-main
 package main
 
 import (
@@ -129,6 +130,54 @@ func main() {
 			"secs %d\n",
 		hosts, *theta, *workload, *secs,
 	)
+
+	//DEMO
+	if *workload == "DEMO" {
+		// Use the first host for Begin (any is fine)
+		c := Dial(hosts[0])
+
+		// 1) Begin
+		br := kvs.BeginRequest{ClientID: uint64(time.Now().UnixNano())}
+		var bs kvs.BeginResponse
+		if err := c.rpcClient.Call("KVService.Begin", &br, &bs); err != nil {
+			log.Fatal("Begin failed:", err)
+		}
+
+		// 2) TxPut("foo","bar")
+		tpr := kvs.TxPutRequest{Tx: bs.Tx, Key: "foo", Value: "bar"}
+		var tps kvs.TxPutResponse
+		if err := c.rpcClient.Call("KVService.TxPut", &tpr, &tps); err != nil {
+			log.Fatal("TxPut failed:", err)
+		}
+		if tps.Status != kvs.StatusOK {
+			log.Fatal("TxPut status:", tps.Status)
+		}
+
+		// 3) TxGet("foo") -> should see staged "bar"
+		tgr := kvs.TxGetRequest{Tx: bs.Tx, Key: "foo"}
+		var tgs kvs.TxGetResponse
+		if err := c.rpcClient.Call("KVService.TxGet", &tgr, &tgs); err != nil {
+			log.Fatal("TxGet failed:", err)
+		}
+		if tgs.Status != kvs.StatusOK {
+			log.Fatal("TxGet status:", tgs.Status)
+		}
+		fmt.Println("DEMO read within tx:", tgs.Value) // expect "bar"
+
+		// 4) Commit (lead=true since only one participant in this demo)
+		cr := kvs.CommitRequest{Tx: bs.Tx, Lead: true}
+		var cs kvs.CommitResponse
+		if err := c.rpcClient.Call("KVService.Commit", &cr, &cs); err != nil {
+			log.Fatal("Commit failed:", err)
+		}
+
+		// 5) Plain non-tx Get should now return "bar"
+		v := c.Get("foo")
+		fmt.Println("DEMO committed value:", v) // expect "bar"
+		return
+	}
+	//END DEMO
+
 
 	start := time.Now()
 
