@@ -88,6 +88,22 @@ type ShardMap struct {
 	shards map[uint64]*Shard
 }
 
+//KeyLock tracks who’s reading/writing each key.
+type KeyLock struct {
+	// Set of transactions holding Shared locks (S)
+	Readers map[string]struct{} // txid -> {}
+	// Transaction holding the Exclusive lock (X); "" means none
+	Writer string
+}
+
+//TxState tracks a transaction’s in-flight updates and which locks it owns (so we can release them fast on commit/abort)
+type TxState struct {
+	Status     string              // "Active","Committed","Aborted"
+	WriteSet   map[uint64]string   // staged writes: keyHash -> value
+	HeldSLocks map[uint64]struct{} // keys this tx holds S on (by keyHash)
+	HeldXLocks map[uint64]struct{} // keys this tx holds X on (by keyHash)
+}
+
 // Constructor
 func NewShardedMap(shardCount uint64, mapAllocCount uint64) *ShardMap {
 	m := &ShardMap{shards: make(map[uint64]*Shard, shardCount)}
@@ -106,14 +122,61 @@ type KVService struct {
 	stats       Stats
 	prevStats   Stats
 	lastPrint   time.Time
+
+	//txTable stores per-tx state on this server.
+	//shardLocks is the per-key lock table for each shard.
+	//commits/aborts we’ll print later for the report.
+	muTx       sync.Mutex
+	txTable    map[string]*TxState               // txid(string) -> TxState
+	shardLocks map[uint64]map[uint64]*KeyLock    // shardIdx -> (keyHash -> KeyLock)
+
+	muCommits sync.Mutex
+	commits   uint64
+	muAborts  sync.Mutex
+	aborts    uint64
 }
 
 func NewKVService(shardCount uint64, mapAllocCount uint64) *KVService {
 	kvs := &KVService{}
 	kvs.shardmp = NewShardedMap(shardCount, mapAllocCount)
 	kvs.lastPrint = time.Now()
+
+	kvs.txTable = make(map[string]*TxState)
+	kvs.shardLocks = make(map[uint64]map[uint64]*KeyLock)
+	for i := uint64(0); i < shardCount; i++ {
+		kvs.shardLocks[i] = make(map[uint64]*KeyLock)
+	}
+
 	return kvs
 }
+
+// Helpers(string-based)
+
+// Return existing or create a new KeyLock for this (shardIdx, keyHash).
+func (kv *KVService) getOrMakeKeyLock(shardIdx, keyHash uint64) *KeyLock {
+	lk, ok := kv.shardLocks[shardIdx][keyHash]
+	if !ok {
+		lk = &KeyLock{Readers: make(map[string]struct{}), Writer: ""}
+		kv.shardLocks[shardIdx][keyHash] = lk
+	}
+	return lk
+}
+
+// No-wait Shared lock attempt (stubbed for Phase 4; real checks in Phase 5)
+func (kv *KVService) acquireS(tx string, shardIdx, keyHash uint64) bool {
+	_ = kv.getOrMakeKeyLock(shardIdx, keyHash)
+	return true
+}
+
+// No-wait Exclusive lock attempt (stubbed for Phase 4; real checks in Phase 5)
+func (kv *KVService) acquireX(tx string, shardIdx, keyHash uint64) bool {
+	_ = kv.getOrMakeKeyLock(shardIdx, keyHash)
+	return true
+}
+
+// Release all locks held by tx (no-op for Phase 4; fill in Phase 5)
+func (kv *KVService) releaseAll(tx string) {}
+
 
 func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) error {
 	kv.muStatsGets.Lock()
