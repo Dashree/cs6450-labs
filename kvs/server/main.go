@@ -1,3 +1,4 @@
+//server-main
 package main
 
 import (
@@ -146,6 +147,33 @@ func (kv *KVService) Put(request *kvs.PutRequest, response *kvs.PutResponse) err
 	// kv.shards[id].mp[request.Key] = request.Value
 	return nil
 }
+
+//Transactional RPC skeletons
+func (kv *KVService) Begin(req *kvs.BeginRequest, resp *kvs.BeginResponse) error {
+	// TODO: fill later
+	return nil
+}
+
+func (kv *KVService) TxGet(req *kvs.TxGetRequest, resp *kvs.TxGetResponse) error {
+	// TODO: fill later
+	return nil
+}
+
+func (kv *KVService) TxPut(req *kvs.TxPutRequest, resp *kvs.TxPutResponse) error {
+	// TODO: fill later
+	return nil
+}
+
+func (kv *KVService) Commit(req *kvs.CommitRequest, resp *kvs.CommitResponse) error {
+	// TODO: fill later
+	return nil
+}
+
+func (kv *KVService) Abort(req *kvs.AbortRequest, resp *kvs.AbortResponse) error {
+	// TODO: fill later
+	return nil
+}
+//END Transactional RPC skeletons
 
 func (kv *KVService) printStats() {
 	kv.muStatsGets.Lock()
