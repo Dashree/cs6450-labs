@@ -162,21 +162,72 @@ func (kv *KVService) getOrMakeKeyLock(shardIdx, keyHash uint64) *KeyLock {
 	return lk
 }
 
-// No-wait Shared lock attempt (stubbed for Phase 4; real checks in Phase 5)
+// No-wait Shared lock attempt allowed unless a different tx holds X.
 func (kv *KVService) acquireS(tx string, shardIdx, keyHash uint64) bool {
-	_ = kv.getOrMakeKeyLock(shardIdx, keyHash)
+	lk := kv.getOrMakeKeyLock(shardIdx, keyHash)
+	// If someone else holds X, we can't read.
+	if lk.Writer != "" && lk.Writer != tx {
+		return false
+	}
+	// Grant/record S.
+	lk.Readers[tx] = struct{}{}
 	return true
 }
 
-// No-wait Exclusive lock attempt (stubbed for Phase 4; real checks in Phase 5)
+// No-wait Exclusive(X) lock attempt: allowed only if no other holders.
+// If the only S holder is the same tx, upgrade is allowed.
 func (kv *KVService) acquireX(tx string, shardIdx, keyHash uint64) bool {
-	_ = kv.getOrMakeKeyLock(shardIdx, keyHash)
+	lk := kv.getOrMakeKeyLock(shardIdx, keyHash)
+
+	// Another writer?
+	if lk.Writer != "" && lk.Writer != tx {
+		return false
+	}
+
+	// Readers present?
+	if len(lk.Readers) > 0 {
+		// If the sole reader is me, upgrade; else conflict.
+		if len(lk.Readers) == 1 {
+			if _, ok := lk.Readers[tx]; ok {
+				delete(lk.Readers, tx) // upgrade
+			} else {
+				return false
+			}
+		} else {
+			// Multiple readers: conflict unless they are all me (impossible), so block.
+			// (We only ever add our own tx once, so len>1 implies others exist.)
+			return false
+		}
+	}
+
+	// Grant X.
+	lk.Writer = tx
 	return true
 }
 
-// Release all locks held by tx (no-op for Phase 4; fill in Phase 5)
-func (kv *KVService) releaseAll(tx string) {}
-
+// Release all locks held by tx (walk the recorded sets).
+//releaseAll frees every lock the tx took, so we don’t leak locks on commit/abort.
+func (kv *KVService) releaseAll(tx string) {
+	kv.muTx.Lock()
+	st := kv.txTable[tx]
+	kv.muTx.Unlock()
+	if st == nil {
+		return
+	}
+	// For both S and X, we can recompute shardIdx from keyHash (same modulo).
+	for keyHash := range st.HeldSLocks {
+		shIdx := keyHash % numShards
+		lk := kv.getOrMakeKeyLock(shIdx, keyHash)
+		delete(lk.Readers, tx)
+	}
+	for keyHash := range st.HeldXLocks {
+		shIdx := keyHash % numShards
+		lk := kv.getOrMakeKeyLock(shIdx, keyHash)
+		if lk.Writer == tx {
+			lk.Writer = ""
+		}
+	}
+}
 
 func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) error {
 	kv.muStatsGets.Lock()
@@ -211,29 +262,150 @@ func (kv *KVService) Put(request *kvs.PutRequest, response *kvs.PutResponse) err
 	return nil
 }
 
-//Transactional RPC skeletons
+// Transactional RPC skeletons
+// Minimal 2PL + 2PC: no-wait locking during Get/Put; atomic apply on Commit; clean release on both Commit/Abort.
+
+// Begin: create tx state and return a unique TxID.
 func (kv *KVService) Begin(req *kvs.BeginRequest, resp *kvs.BeginResponse) error {
-	// TODO: fill later
+	tx := fmt.Sprintf("%d-%d", req.ClientID, time.Now().UnixNano())
+
+	kv.muTx.Lock()
+	kv.txTable[tx] = &TxState{
+		Status:     "Active",
+		WriteSet:   make(map[uint64]string),
+		HeldSLocks: make(map[uint64]struct{}),
+		HeldXLocks: make(map[uint64]struct{}),
+	}
+	kv.muTx.Unlock()
+
+	resp.Tx = kvs.TxID(tx)
 	return nil
 }
 
+// TxGet: try S lock, then return staged value (if any) or committed value.
 func (kv *KVService) TxGet(req *kvs.TxGetRequest, resp *kvs.TxGetResponse) error {
-	// TODO: fill later
+	tx := string(req.Tx)
+
+	kv.muTx.Lock()
+	st := kv.txTable[tx]
+	kv.muTx.Unlock()
+	if st == nil || st.Status != "Active" {
+		resp.Status = kvs.StatusNotInTx
 	return nil
 }
 
+kHash := getShardIndexCached(req.Key)
+	// Try to acquire S (no-wait).
+	if ok := kv.acquireS(tx, kHash.shardIdx, kHash.keyHash); !ok {
+		resp.Status = kvs.StatusWouldBlock
+		return nil
+	}
+	// Record that this tx holds S on this key.
+	st.HeldSLocks[kHash.keyHash] = struct{}{}
+
+	// Read-your-writes: if we staged it in this tx, return that.
+	if v, ok := st.WriteSet[kHash.keyHash]; ok {
+		resp.Value = v
+		resp.Status = kvs.StatusOK
+		return nil
+	}
+
+	// Otherwise, read committed value.
+	sh := kv.shardmp.shards[kHash.shardIdx]
+	sh.muShard.RLock()
+	val, found := sh.mp[kHash.keyHash]
+	sh.muShard.RUnlock()
+	if found {
+		resp.Value = val
+	}
+	resp.Status = kvs.StatusOK
+	return nil
+}
+
+// TxPut: try X lock, then stage the write (do not apply to main map yet).
 func (kv *KVService) TxPut(req *kvs.TxPutRequest, resp *kvs.TxPutResponse) error {
-	// TODO: fill later
+	tx := string(req.Tx)
+
+	kv.muTx.Lock()
+	st := kv.txTable[tx]
+	kv.muTx.Unlock()
+	if st == nil || st.Status != "Active" {
+		resp.Status = kvs.StatusNotInTx
+		return nil
+	}
+
+	kHash := getShardIndexCached(req.Key)
+	// Try to acquire X (no-wait).
+	if ok := kv.acquireX(tx, kHash.shardIdx, kHash.keyHash); !ok {
+		resp.Status = kvs.StatusWouldBlock
+		return nil
+	}
+	// Record X lock and stage the value.
+	st.HeldXLocks[kHash.keyHash] = struct{}{}
+	st.WriteSet[kHash.keyHash] = req.Value
+	resp.Status = kvs.StatusOK
 	return nil
 }
 
+// Commit: apply staged writes, release locks, mark committed, count if Lead.
 func (kv *KVService) Commit(req *kvs.CommitRequest, resp *kvs.CommitResponse) error {
-	// TODO: fill later
+	tx := string(req.Tx)
+
+	kv.muTx.Lock()
+	st := kv.txTable[tx]
+	kv.muTx.Unlock()
+	if st == nil {
+		return nil
+	}
+
+	// Apply all staged writes to the real map.
+	for keyHash, val := range st.WriteSet {
+		shIdx := keyHash % numShards
+		sh := kv.shardmp.shards[shIdx]
+		sh.muShard.Lock()
+		sh.mp[keyHash] = val
+		sh.muShard.Unlock()
+	}
+
+	// Release locks.
+	kv.releaseAll(tx)
+
+	// Mark and remove tx state.
+	kv.muTx.Lock()
+	st.Status = "Committed"
+	delete(kv.txTable, tx)
+	kv.muTx.Unlock()
+
+	// Count commit on the lead participant.
+	if req.Lead {
+		kv.muCommits.Lock()
+		kv.commits++
+		kv.muCommits.Unlock()
+	}
 	return nil
 }
 
+// Abort: drop staged writes, release locks, mark aborted, count abort.
 func (kv *KVService) Abort(req *kvs.AbortRequest, resp *kvs.AbortResponse) error {
-	// TODO: fill later
+	tx := string(req.Tx)
+
+	kv.muTx.Lock()
+	st := kv.txTable[tx]
+	kv.muTx.Unlock()
+	if st == nil {
+		return nil
+	}
+
+	kv.releaseAll(tx)
+
+	kv.muTx.Lock()
+	st.Status = "Aborted"
+	delete(kv.txTable, tx)
+	kv.muTx.Unlock()
+
+	kv.muAborts.Lock()
+	kv.aborts++
+	kv.muAborts.Unlock()
 	return nil
 }
 //END Transactional RPC skeletons
