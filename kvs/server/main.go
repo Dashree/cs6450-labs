@@ -29,97 +29,180 @@ func (s *Stats) Sub(prev *Stats) Stats {
 }
 
 type transaction struct {
-	id  uint32
-	ops []kvs.TransactionOperation
+	clientID uint32
+	ops      []kvs.TransactionOperation
+}
+
+type Value struct {
+	value   string
+	writer  *transaction
+	readers map[uint32]*transaction
+	lock    sync.Mutex
 }
 
 type KVService struct {
-	sync.Mutex
-	mp           map[string]string
-	transactions map[uint32]*transaction
-	writer       *transaction
-	stats        Stats
-	prevStats    Stats
-	lastPrint    time.Time
+	mp              map[string]*Value
+	mpLock          sync.Mutex
+	transactionLock sync.Mutex
+	transactions    map[uint32]*transaction
+	stats           Stats
+	prevStats       Stats
+	lastPrint       time.Time
 }
 
 func NewKVService() *KVService {
 	kvs := &KVService{}
-	kvs.mp = make(map[string]string)
+	kvs.mp = make(map[string]*Value)
 	kvs.lastPrint = time.Now()
 	return kvs
 }
 
 func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) error {
-	kv.Lock()
-	defer kv.Unlock()
+	fmt.Printf("Get %s for transaction %d\n", request.Key, request.TransactionId)
+	kv.transactionLock.Lock()
+	t, ok := kv.transactions[request.TransactionId]
+	if !ok {
+		t = &transaction{
+			clientID: request.TransactionId,
+			ops:      make([]kvs.TransactionOperation, 0),
+		}
+		kv.transactions[request.TransactionId] = t
+	} else {
+		t.ops = append(t.ops, kvs.TransactionOperation{
+			IsRead: true,
+			Key:    request.Key,
+		})
+		kv.transactions[request.TransactionId] = t
+	}
+
+	kv.transactionLock.Unlock()
+	//check if write locked
+	if v, ok := kv.mp[request.Key]; ok && v.writer != nil {
+		response.Yes = false
+		return nil
+	}
 	//get read lock
-	//if you can't get read lock, respond no
-	//if you can get read lock and key is found, respond with yes
+	if v, ok := kv.mp[request.Key]; ok {
+		v.readers[request.TransactionId] = t
+	}
 
-	kv.stats.gets++
-
-	if value, found := kv.mp[request.Key]; found {
-		response.Value = value
+	if v, found := kv.mp[request.Key]; found {
+		response.Value = v.value
+		response.Yes = true
 	}
 	return nil
 }
 
 func (kv *KVService) Put(request *kvs.PutRequest, response *kvs.PutResponse) error {
-	kv.Lock()
-	defer kv.Unlock()
-	//get write lock
-	//if you can't get write lock, respond no
-	//if you can get write lock, respond yes
+	fmt.Printf("Put %s for transaction %d\n", request.Key, request.TransactionId)
+	//save transaction operation
+	kv.transactionLock.Lock()
+	t := kv.transactions[request.TransactionId]
+	t.ops = append(t.ops, kvs.TransactionOperation{
+		IsRead: true,
+		Key:    request.Key,
+	})
+	kv.transactions[request.TransactionId] = t
+	kv.transactionLock.Unlock()
 
-	kv.stats.puts++
+	//check if write locked
+	if v, ok := kv.mp[request.Key]; ok && v.writer != nil && len(v.readers) <= 1 && v.readers[request.TransactionId] != nil {
+		//someone else has the write lock
+		response.Yes = false
+		fmt.Printf("Key %s is write locked for transaction %d\n", request.Key, request.TransactionId)
+		return nil
+	} else {
+		//get write lock
+		if v, ok := kv.mp[request.Key]; ok {
+			v.writer = t
+		}
+		fmt.Printf("Put %s : %s\n", request.Key, request.Value)
+	}
 
-	kv.mp[request.Key] = request.Value
+	response.Yes = true
 
 	return nil
 }
 
 func (kv *KVService) Commit(request *kvs.CommitRequest, response *kvs.CommitResponse) error {
 	transactionId := request.TransactionId
+	fmt.Printf("Committing transaction %d\n", transactionId)
+	kv.transactionLock.Lock()
 	transaction := kv.transactions[transactionId]
 	for _, op := range transaction.ops {
 		if op.IsRead {
-			value := kv.mp[op.Key]
+			kv.mp[op.Key].readers[transactionId] = nil
 		} else {
-			kv.mp[op.Key] = op.Value
+			fmt.Printf("Committing %s : %s\n", op.Key, op.Value)
+			kv.mp[op.Key].value = op.Value
+			kv.mp[op.Key].writer = nil
 		}
 	}
 	response.Ack = true
 	delete(kv.transactions, transactionId)
-	//free locks
+	kv.transactionLock.Unlock()
 
 	return nil
 }
 
 func (kv *KVService) Abort(request *kvs.CommitRequest, response *kvs.AbortResponse) error {
 	transactionId := request.TransactionId
-
+	fmt.Printf("Aborting transaction %d\n", transactionId)
+	kv.transactionLock.Lock()
+	defer kv.transactionLock.Unlock()
+	transaction, ok := kv.transactions[request.TransactionId]
+	if !ok {
+		response.Ack = false
+		return nil
+	}
+	for _, op := range transaction.ops {
+		if op.IsRead {
+			fmt.Printf("Aborting read lock on %s for tran id %d\n", op.Key, transactionId)
+			kv.mp[op.Key].readers[transactionId] = nil
+		} else {
+			kv.mp[op.Key].writer = nil
+		}
+	}
+	delete(kv.transactions, request.TransactionId)
+	response.Ack = true
 	return nil
 }
 
-func (kv *KVService) printStats() {
-	kv.Lock()
-	stats := kv.stats
-	prevStats := kv.prevStats
-	kv.prevStats = stats
-	now := time.Now()
-	lastPrint := kv.lastPrint
-	kv.lastPrint = now
-	kv.Unlock()
+func (kv *KVService) InitializeAccount(request *kvs.InitializeAccountRequest, response *kvs.InitializeAccountResponse) error {
+	kv.mpLock.Lock()
+	defer kv.mpLock.Unlock()
 
-	diff := stats.Sub(&prevStats)
-	deltaS := now.Sub(lastPrint).Seconds()
+	kv.mp[request.Key] = &Value{
+		value:   request.Value,
+		writer:  nil,
+		readers: make(map[uint32]*transaction),
+	}
+	kv.transactions = make(map[uint32]*transaction)
 
-	fmt.Printf("get/s %0.2f\nput/s %0.2f\nops/s %0.2f\n\n",
-		float64(diff.gets)/deltaS,
-		float64(diff.puts)/deltaS,
-		float64(diff.gets+diff.puts)/deltaS)
+	fmt.Printf("Initialized account %s with value %s\n", request.Key, request.Value)
+
+	response.Ack = true
+	return nil
 }
+
+// func (kv *KVService) printStats() {
+// 	kv.Lock()
+// 	stats := kv.stats
+// 	prevStats := kv.prevStats
+// 	kv.prevStats = stats
+// 	now := time.Now()
+// 	lastPrint := kv.lastPrint
+// 	kv.lastPrint = now
+// 	kv.Unlock()
+
+// 	diff := stats.Sub(&prevStats)
+// 	deltaS := now.Sub(lastPrint).Seconds()
+
+// 	fmt.Printf("get/s %0.2f\nput/s %0.2f\nops/s %0.2f\n\n",
+// 		float64(diff.gets)/deltaS,
+// 		float64(diff.puts)/deltaS,
+// 		float64(diff.gets+diff.puts)/deltaS)
+// }
 
 func main() {
 	port := flag.String("port", "8080", "Port to run the server on")
@@ -141,7 +224,7 @@ func main() {
 
 	go func() {
 		for {
-			kvs.printStats()
+			// kvs.printStats()
 			time.Sleep(1 * time.Second)
 		}
 	}()

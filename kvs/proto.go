@@ -1,8 +1,9 @@
 package kvs
 
 type PutRequest struct {
-	Key   string
-	Value string
+	Key           string
+	Value         string
+	TransactionId uint32
 }
 
 type PutResponse struct {
@@ -10,7 +11,8 @@ type PutResponse struct {
 }
 
 type GetRequest struct {
-	Key string
+	Key           string
+	TransactionId uint32
 }
 
 type GetResponse struct {
@@ -31,6 +33,15 @@ type AbortRequest struct {
 }
 
 type AbortResponse struct {
+	Ack bool
+}
+
+type InitializeAccountRequest struct {
+	Key   string
+	Value string
+}
+
+type InitializeAccountResponse struct {
 	Ack bool
 }
 

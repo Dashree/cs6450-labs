@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"hash/maphash"
 	"log"
+	"math/rand"
 	"net/rpc"
-	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -17,6 +18,7 @@ import (
 
 var reqBatchsize uint32
 var workloadsPerHost uint32
+var numberOfAccountsperClient int
 
 func getHostForKey(key string, numHosts int) int {
 	if numHosts <= 0 {
@@ -44,9 +46,10 @@ func Dial(addr string) *Client {
 	return &Client{rpcClient}
 }
 
-func (client *Client) Get(key string) bool {
+func (client *Client) Get(key string, transactionId uuid.UUID) kvs.GetResponse {
 	request := kvs.GetRequest{
-		Key: key,
+		Key:           key,
+		TransactionId: transactionId.ID(),
 	}
 	response := kvs.GetResponse{}
 	err := client.rpcClient.Call("KVService.Get", &request, &response)
@@ -54,13 +57,14 @@ func (client *Client) Get(key string) bool {
 		log.Fatal(err)
 	}
 
-	return response.Yes
+	return response
 }
 
-func (client *Client) Put(key string, value string) bool {
+func (client *Client) Put(key string, value string, transactionId uuid.UUID) kvs.PutResponse {
 	request := kvs.PutRequest{
-		Key:   key,
-		Value: value,
+		Key:           key,
+		Value:         value,
+		TransactionId: transactionId.ID(),
 	}
 	response := kvs.PutResponse{}
 	err := client.rpcClient.Call("KVService.Put", &request, &response)
@@ -68,36 +72,45 @@ func (client *Client) Put(key string, value string) bool {
 		log.Fatal(err)
 	}
 
-	return response.Yes
+	return response
 }
 
-func (clients *Clients) Begin(clientId int, operations []kvs.TransactionOperation) {
+func (clients *Clients) Begin(clientId int, src int, dst int, operations []kvs.TransactionOperation) {
 	//creates and enters a transaction.
 	//Generate transaction ID
 	transactionId := uuid.New()
-	//include Client ID
-	//server list
-	//Keep a structure to track all servers that gets/puts are sent to. since we need to send commit or aborts to them
-	//Track the writeset for the transaction.
-	//This writeset is for when the client calls a get on something they already put
+	amount := rand.Intn(2)
+	fmt.Printf("Account %d requesting %d from %d with transaction id %d\n", src, amount, dst, transactionId.ID())
+
 	for {
 		serverList := []int{} //keeps track of index into clients.clients
 		for _, op := range operations {
 			index := getHostForKey(op.Key, len(clients.clients))
 			serverList = append(serverList, index)
-			var response bool
-			if op.IsRead {
-				response = clients.clients[index].Get(op.Key)
-			} else {
-				response = clients.clients[index].Put(op.Key, op.Value)
+			var response kvs.GetResponse
+			var response2 kvs.GetResponse
+			var response3 kvs.PutResponse
+			var response4 kvs.PutResponse
+			//pretend all operations are a read AND write
+			//do two reads
+			response = clients.clients[index].Get(strconv.Itoa(src), transactionId)
+			response2 = clients.clients[index].Get(strconv.Itoa(dst), transactionId)
+			dstValue, _ := strconv.Atoi(response2.Value)
+			srcValue, _ := strconv.Atoi(response.Value)
+			//if reads are okay do two writes
+			if dstValue > amount && (response.Yes && response2.Yes) {
+				response3 = clients.clients[index].Put(strconv.Itoa(src), strconv.Itoa(srcValue+amount), transactionId)
+				response4 = clients.clients[index].Put(strconv.Itoa(dst), strconv.Itoa(dstValue-amount), transactionId)
+				if response3.Yes && response4.Yes {
+					clients.Commit(transactionId, serverList)
+					fmt.Printf("Account %d successfully transferred %d to %d\n", src, amount, dst)
+					return
+				}
 			}
-			if !response {
-				clients.Abort(transactionId, serverList)
-				continue
-			}
+			clients.Abort(transactionId, serverList)
+			// time.Sleep(5 * time.Second)
+			continue
 		}
-		clients.Commit(transactionId, serverList)
-		break
 	}
 }
 
@@ -136,7 +149,7 @@ func (clients *Clients) Abort(transactionId uuid.UUID, serverList []int) {
 	}
 }
 
-func runClient(clientId int, addrs []string, done *atomic.Bool, workload *kvs.Workload, resultsCh chan<- uint64) {
+func runClient(clientId int, accountId int, addrs []string, done *atomic.Bool, workload *kvs.Workload) {
 	clients := Clients{clients: []*Client{}}
 	for _, addr := range addrs {
 		client := Dial(addr)
@@ -146,22 +159,47 @@ func runClient(clientId int, addrs []string, done *atomic.Bool, workload *kvs.Wo
 	value := strings.Repeat("x", 128)
 	const batchSize = 1024
 
-	opsCompleted := uint64(0)
-
 	for !done.Load() {
 		for j := 0; j < batchSize; j++ {
 			var transactionOps []kvs.TransactionOperation
-			for i := 0; i < 3; i++ {
+			for i := 0; i < 2; i++ {
 				op := workload.Next()
 				key := fmt.Sprintf("%d", op.Key)
 				transactionOps = append(transactionOps, kvs.TransactionOperation{IsRead: op.IsRead, Key: key, Value: value})
 			}
+			n := rand.Intn(numberOfAccountsperClient)
+			if n == accountId {
+				n = (n + 1) % numberOfAccountsperClient
+			}
 			//Begin Transaction
-			clients.Begin(clientId, transactionOps)
+			clients.Begin(clientId, accountId, n, transactionOps)
 		}
 	}
-	resultsCh <- opsCompleted
+}
 
+func initialize(addrs []string, value string) {
+	clients := Clients{clients: []*Client{}}
+	for _, addr := range addrs {
+		client := Dial(addr)
+		clients.clients = append(clients.clients, client)
+	}
+	for i := 0; i < numberOfAccountsperClient; i++ {
+		key := fmt.Sprintf("%d", numberOfAccountsperClient-1-i)
+		clients.clients[getHostForKey(key, len(clients.clients))].initializeAccount(key, value)
+	}
+}
+
+func (client *Client) initializeAccount(key string, value string) bool {
+	request := kvs.InitializeAccountRequest{
+		Key:   key,
+		Value: value,
+	}
+	response := kvs.InitializeAccountResponse{}
+	err := client.rpcClient.Call("KVService.InitializeAccount", &request, &response)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return response.Ack
 }
 
 type HostList []string
@@ -185,6 +223,7 @@ func main() {
 	clientID := flag.Int("clientid", -1, "Relative client ID starting at 0")
 	reqBatchsize = uint32(*flag.Uint64("batch-size", 8, "Batch for Get Requests"))
 	workloadsPerHost = uint32(*flag.Uint64("thrds-per-host", 8, "Number of go routines per hosts"))
+	numberOfAccountsperClient = *flag.Int("accounts-per-client", 3, "Number of accounts each client manages")
 
 	flag.Parse()
 
@@ -203,25 +242,19 @@ func main() {
 	start := time.Now()
 
 	done := atomic.Bool{}
-	resultsCh := make(chan uint64)
+	// resultsCh := make(chan uint64)
 	tltOpsCompleted := uint64(0)
+	initialize(hosts, fmt.Sprintf("%d", 1000))
 
-	var numberOfClientsPerHost = runtime.NumCPU() * int(workloadsPerHost)
-	numberOfClientsPerHost = 1
-	for j := 0; j < numberOfClientsPerHost; j++ {
+	for j := 0; j < numberOfAccountsperClient; j++ {
 		go func(clientId int) {
 			workload := kvs.NewWorkload(*workload, *theta)
-			runClient(clientId, hosts, &done, workload, resultsCh)
+			runClient(clientId, j, hosts, &done, workload)
 		}(*clientID)
 	}
 
 	time.Sleep(time.Duration(*secs) * time.Second)
 	done.Store(true)
-
-	totalWorkloads := numberOfClientsPerHost
-	for i := 0; i < totalWorkloads; i++ {
-		tltOpsCompleted += <-resultsCh
-	}
 
 	elapsed := time.Since(start)
 
