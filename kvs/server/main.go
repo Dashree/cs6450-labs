@@ -79,9 +79,13 @@ func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) err
 	//check if write locked
 	if v, ok := kv.mp[request.Key]; ok && v.writer != nil {
 		response.Yes = false
+		fmt.Printf("Key %s is write locked for transaction %d\n", request.Key, request.TransactionId)
+		fmt.Printf("Current writer: %v\n", v.writer)
 		return nil
 	}
 	//get read lock
+	kv.mp[request.Key].lock.Lock()
+	defer kv.mp[request.Key].lock.Unlock()
 	if v, ok := kv.mp[request.Key]; ok {
 		v.readers[request.TransactionId] = t
 	}
@@ -99,8 +103,9 @@ func (kv *KVService) Put(request *kvs.PutRequest, response *kvs.PutResponse) err
 	kv.transactionLock.Lock()
 	t := kv.transactions[request.TransactionId]
 	t.ops = append(t.ops, kvs.TransactionOperation{
-		IsRead: true,
+		IsRead: false,
 		Key:    request.Key,
+		Value:  request.Value,
 	})
 	kv.transactions[request.TransactionId] = t
 	kv.transactionLock.Unlock()
@@ -110,6 +115,7 @@ func (kv *KVService) Put(request *kvs.PutRequest, response *kvs.PutResponse) err
 		//someone else has the write lock
 		response.Yes = false
 		fmt.Printf("Key %s is write locked for transaction %d\n", request.Key, request.TransactionId)
+		fmt.Printf("Current writer: %v\n", v.writer)
 		return nil
 	} else {
 		//get write lock
@@ -128,19 +134,24 @@ func (kv *KVService) Commit(request *kvs.CommitRequest, response *kvs.CommitResp
 	transactionId := request.TransactionId
 	fmt.Printf("Committing transaction %d\n", transactionId)
 	kv.transactionLock.Lock()
-	transaction := kv.transactions[transactionId]
-	for _, op := range transaction.ops {
-		if op.IsRead {
-			kv.mp[op.Key].readers[transactionId] = nil
-		} else {
-			fmt.Printf("Committing %s : %s\n", op.Key, op.Value)
-			kv.mp[op.Key].value = op.Value
-			kv.mp[op.Key].writer = nil
+	defer kv.transactionLock.Unlock()
+	transaction, ok := kv.transactions[transactionId]
+
+	if ok {
+		for _, op := range transaction.ops {
+			if op.IsRead {
+				kv.mp[op.Key].lock.Lock()
+				kv.mp[op.Key].readers[transactionId] = nil
+				kv.mp[op.Key].lock.Unlock()
+			} else {
+				kv.mp[op.Key].value = op.Value
+				kv.mp[op.Key].writer = nil
+			}
 		}
+		delete(kv.transactions, transactionId)
+		response.Ack = true
+		return nil
 	}
-	response.Ack = true
-	delete(kv.transactions, transactionId)
-	kv.transactionLock.Unlock()
 
 	return nil
 }
@@ -151,20 +162,21 @@ func (kv *KVService) Abort(request *kvs.CommitRequest, response *kvs.AbortRespon
 	kv.transactionLock.Lock()
 	defer kv.transactionLock.Unlock()
 	transaction, ok := kv.transactions[request.TransactionId]
-	if !ok {
-		response.Ack = false
+	if ok {
+		for _, op := range transaction.ops {
+			if op.IsRead {
+				fmt.Printf("Aborting read lock on %s for tran id %d\n", op.Key, transactionId)
+				kv.mp[op.Key].lock.Lock()
+				kv.mp[op.Key].readers[transactionId] = nil
+				kv.mp[op.Key].lock.Unlock()
+			} else {
+				kv.mp[op.Key].writer = nil
+			}
+		}
+		delete(kv.transactions, request.TransactionId)
+		response.Ack = true
 		return nil
 	}
-	for _, op := range transaction.ops {
-		if op.IsRead {
-			fmt.Printf("Aborting read lock on %s for tran id %d\n", op.Key, transactionId)
-			kv.mp[op.Key].readers[transactionId] = nil
-		} else {
-			kv.mp[op.Key].writer = nil
-		}
-	}
-	delete(kv.transactions, request.TransactionId)
-	response.Ack = true
 	return nil
 }
 
@@ -182,6 +194,18 @@ func (kv *KVService) InitializeAccount(request *kvs.InitializeAccountRequest, re
 	fmt.Printf("Initialized account %s with value %s\n", request.Key, request.Value)
 
 	response.Ack = true
+	return nil
+}
+
+func (kv *KVService) GetAccountBalance(request *kvs.GetSumRequest, response *kvs.GetSumResponse) error {
+	kv.mpLock.Lock()
+	kv.stats.gets++
+
+	if value, found := kv.mp[request.Key]; found {
+		response.Value = value.value
+	}
+	kv.mpLock.Unlock()
+
 	return nil
 }
 

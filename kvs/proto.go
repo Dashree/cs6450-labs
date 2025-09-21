@@ -45,6 +45,14 @@ type InitializeAccountResponse struct {
 	Ack bool
 }
 
+type GetSumRequest struct {
+	Key string
+}
+
+type GetSumResponse struct {
+	Value string
+}
+
 type TransactionOperation struct {
 	IsRead bool
 	Key    string

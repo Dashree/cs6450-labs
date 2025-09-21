@@ -7,6 +7,7 @@ import (
 	"log"
 	"math/rand"
 	"net/rpc"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -80,13 +81,15 @@ func (clients *Clients) Begin(clientId int, src int, dst int, operations []kvs.T
 	//Generate transaction ID
 	transactionId := uuid.New()
 	amount := rand.Intn(2)
-	fmt.Printf("Account %d requesting %d from %d with transaction id %d\n", src, amount, dst, transactionId.ID())
+	// fmt.Printf("Account %d requesting %d from %d with transaction id %d\n", src, amount, dst, transactionId.ID())
 
 	for {
 		serverList := []int{} //keeps track of index into clients.clients
 		for _, op := range operations {
 			index := getHostForKey(op.Key, len(clients.clients))
-			serverList = append(serverList, index)
+			if !slices.Contains(serverList, index) {
+				serverList = append(serverList, index)
+			}
 			var response kvs.GetResponse
 			var response2 kvs.GetResponse
 			var response3 kvs.PutResponse
@@ -97,16 +100,19 @@ func (clients *Clients) Begin(clientId int, src int, dst int, operations []kvs.T
 			response2 = clients.clients[index].Get(strconv.Itoa(dst), transactionId)
 			dstValue, _ := strconv.Atoi(response2.Value)
 			srcValue, _ := strconv.Atoi(response.Value)
+			fmt.Printf("Account %d has value %d\n", src, srcValue)
+			fmt.Printf("Account %d has value %d\n", dst, dstValue)
 			//if reads are okay do two writes
 			if dstValue > amount && (response.Yes && response2.Yes) {
 				response3 = clients.clients[index].Put(strconv.Itoa(src), strconv.Itoa(srcValue+amount), transactionId)
 				response4 = clients.clients[index].Put(strconv.Itoa(dst), strconv.Itoa(dstValue-amount), transactionId)
 				if response3.Yes && response4.Yes {
 					clients.Commit(transactionId, serverList)
-					fmt.Printf("Account %d successfully transferred %d to %d\n", src, amount, dst)
+					// fmt.Printf("Account %d successfully transferred %d to %d using transaction %d\n", src, amount, dst, transactionId.ID())
 					return
 				}
 			}
+			// fmt.Printf("Account %d failed to transfer %d to %d. Transaction: %d Retrying...\n", src, amount, dst, transactionId.ID())
 			clients.Abort(transactionId, serverList)
 			// time.Sleep(5 * time.Second)
 			continue
@@ -127,7 +133,6 @@ func (clients *Clients) Commit(transactionId uuid.UUID, serverList []int) {
 		if err != nil {
 			log.Fatal(err)
 		}
-
 	}
 }
 
@@ -202,6 +207,37 @@ func (client *Client) initializeAccount(key string, value string) bool {
 	return response.Ack
 }
 
+func getTotal(addrs []string) {
+	clients := Clients{clients: []*Client{}}
+	for _, addr := range addrs {
+		client := Dial(addr)
+		clients.clients = append(clients.clients, client)
+	}
+	sum := 0
+	for i := 0; i < numberOfAccountsperClient; i++ {
+		key := fmt.Sprintf("%d", numberOfAccountsperClient-1-i)
+		fmt.Printf("Getting sum for key %s\n", key)
+		value := clients.clients[getHostForKey(key, len(clients.clients))].getSum(key)
+		fmt.Printf("Total sum for key: %d\n", value)
+		sum += value
+	}
+	fmt.Printf("Total sum across all accounts: %d\n", sum)
+
+}
+
+func (client *Client) getSum(key string) int {
+	request := kvs.GetSumRequest{
+		Key: key,
+	}
+	response := kvs.GetSumResponse{}
+	err := client.rpcClient.Call("KVService.Get", &request, &response)
+	if err != nil {
+		log.Fatal(err)
+	}
+	ret, _ := strconv.Atoi(response.Value)
+	return ret
+}
+
 type HostList []string
 
 func (h *HostList) String() string {
@@ -219,11 +255,11 @@ func main() {
 	flag.Var(&hosts, "hosts", "Comma-separated list of host:ports to connect to")
 	theta := flag.Float64("theta", 0.99, "Zipfian distribution skew parameter")
 	workload := flag.String("workload", "YCSB-B", "Workload type (YCSB-A, YCSB-B, YCSB-C)")
-	secs := flag.Int("secs", 30, "Duration in seconds for each client to run")
+	secs := flag.Int("secs", 1, "Duration in seconds for each client to run")
 	clientID := flag.Int("clientid", -1, "Relative client ID starting at 0")
 	reqBatchsize = uint32(*flag.Uint64("batch-size", 8, "Batch for Get Requests"))
 	workloadsPerHost = uint32(*flag.Uint64("thrds-per-host", 8, "Number of go routines per hosts"))
-	numberOfAccountsperClient = *flag.Int("accounts-per-client", 3, "Number of accounts each client manages")
+	numberOfAccountsperClient = *flag.Int("accounts-per-client", 2, "Number of accounts each client manages")
 
 	flag.Parse()
 
@@ -253,11 +289,13 @@ func main() {
 		}(*clientID)
 	}
 
-	time.Sleep(time.Duration(*secs) * time.Second)
+	time.Sleep(75 * time.Millisecond) // wait for final stats to be printed
 	done.Store(true)
 
 	elapsed := time.Since(start)
 
 	opsPerSec := float64(tltOpsCompleted) / elapsed.Seconds()
+	time.Sleep(1 * time.Second) // wait for final stats to be printed
 	fmt.Printf("throughput %.2f ops/s\n", opsPerSec)
+	getTotal(hosts)
 }
