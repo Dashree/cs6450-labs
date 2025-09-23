@@ -127,7 +127,7 @@ func main() {
 	resultsCh := make(chan uint64)
 	tltOpsCompleted := uint64(0)
 
-	var numberOfClientsPerHost = runtime.NumCPU() * 4
+	var numberOfClientsPerHost = runtime.NumCPU() * 8
 	for _, host := range hosts {
 		for j := 0; j < numberOfClientsPerHost; j++ {
 			go func(clientId int) {
