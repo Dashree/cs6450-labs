@@ -123,6 +123,10 @@ type KVService struct {
 	prevStats   Stats
 	lastPrint   time.Time
 
+	prevCommits uint64
+	prevAborts  uint64
+
+
 	//txTable stores per-tx state on this server.
 	//shardLocks is the per-key lock table for each shard.
 	//commits/aborts we’ll print later for the report.
@@ -411,6 +415,7 @@ func (kv *KVService) Abort(req *kvs.AbortRequest, resp *kvs.AbortResponse) error
 //END Transactional RPC skeletons
 
 func (kv *KVService) printStats() {
+	//gets/puts snapshot
 	kv.muStatsGets.Lock()
 	kv.muStatsPuts.Lock()
 	stats := kv.stats
@@ -422,13 +427,29 @@ func (kv *KVService) printStats() {
 	kv.muStatsPuts.Unlock()
 	kv.muStatsGets.Unlock()
 
+	//commits/aborts snapshot
+	kv.muCommits.Lock()
+	commits := kv.commits
+	prevCommits := kv.prevCommits
+	kv.prevCommits = commits
+	kv.muCommits.Unlock()
+
+	kv.muAborts.Lock()
+	aborts := kv.aborts
+	prevAborts := kv.prevAborts
+	kv.prevAborts = aborts
+	kv.muAborts.Unlock()
+
 	diff := stats.Sub(&prevStats)
 	deltaS := now.Sub(lastPrint).Seconds()
 
-	fmt.Printf("get/s %0.2f\nput/s %0.2f\nops/s %0.2f\n\n",
+	fmt.Printf("get/s %0.2f\nput/s %0.2f\nops/s %0.2f\ncommit/s %0.2f\nabort/s %0.2f\n\n",
 		float64(diff.gets)/deltaS,
 		float64(diff.puts)/deltaS,
-		float64(diff.gets+diff.puts)/deltaS)
+		float64(diff.gets+diff.puts)/deltaS,
+		float64(commits-prevCommits)/deltaS,
+		float64(aborts-prevAborts)/deltaS,
+	)
 }
 
 func main() {
