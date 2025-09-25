@@ -81,7 +81,7 @@ func (clients *Clients) Begin(clientId int, src int, dst int, operations []kvs.T
 	//Generate transaction ID
 	transactionId := uuid.New()
 	amount := rand.Intn(2)
-	// fmt.Printf("Account %d requesting %d from %d with transaction id %d\n", src, amount, dst, transactionId.ID())
+	fmt.Printf("Account %d requesting %d from %d with transaction id %d\n", src, amount, dst, transactionId.ID())
 
 	for {
 		serverList := []int{} //keeps track of index into clients.clients
@@ -100,21 +100,21 @@ func (clients *Clients) Begin(clientId int, src int, dst int, operations []kvs.T
 			response2 = clients.clients[index].Get(strconv.Itoa(dst), transactionId)
 			dstValue, _ := strconv.Atoi(response2.Value)
 			srcValue, _ := strconv.Atoi(response.Value)
-			fmt.Printf("Account %d has value %d\n", src, srcValue)
-			fmt.Printf("Account %d has value %d\n", dst, dstValue)
+			// fmt.Printf("Account %d has value %d\n", src, srcValue)
+			// fmt.Printf("Account %d has value %d\n", dst, dstValue)
 			//if reads are okay do two writes
 			if dstValue > amount && (response.Yes && response2.Yes) {
 				response3 = clients.clients[index].Put(strconv.Itoa(src), strconv.Itoa(srcValue+amount), transactionId)
 				response4 = clients.clients[index].Put(strconv.Itoa(dst), strconv.Itoa(dstValue-amount), transactionId)
 				if response3.Yes && response4.Yes {
 					clients.Commit(transactionId, serverList)
-					// fmt.Printf("Account %d successfully transferred %d to %d using transaction %d\n", src, amount, dst, transactionId.ID())
+					fmt.Printf("Account %d successfully transferred %d to %d using transaction %d\n", src, amount, dst, transactionId.ID())
 					return
 				}
 			}
-			// fmt.Printf("Account %d failed to transfer %d to %d. Transaction: %d Retrying...\n", src, amount, dst, transactionId.ID())
+			fmt.Printf("Account %d failed to transfer %d to %d. Transaction: %d Retrying...\n", src, amount, dst, transactionId.ID())
 			clients.Abort(transactionId, serverList)
-			// time.Sleep(5 * time.Second)
+			time.Sleep(5 * time.Second)
 			continue
 		}
 	}
@@ -230,7 +230,7 @@ func (client *Client) getSum(key string) int {
 		Key: key,
 	}
 	response := kvs.GetSumResponse{}
-	err := client.rpcClient.Call("KVService.Get", &request, &response)
+	err := client.rpcClient.Call("KVService.GetAccountBalance", &request, &response)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -259,7 +259,7 @@ func main() {
 	clientID := flag.Int("clientid", -1, "Relative client ID starting at 0")
 	reqBatchsize = uint32(*flag.Uint64("batch-size", 8, "Batch for Get Requests"))
 	workloadsPerHost = uint32(*flag.Uint64("thrds-per-host", 8, "Number of go routines per hosts"))
-	numberOfAccountsperClient = *flag.Int("accounts-per-client", 2, "Number of accounts each client manages")
+	numberOfAccountsperClient = *flag.Int("accounts-per-client", 3, "Number of accounts each client manages")
 
 	flag.Parse()
 
@@ -289,7 +289,7 @@ func main() {
 		}(*clientID)
 	}
 
-	time.Sleep(75 * time.Millisecond) // wait for final stats to be printed
+	time.Sleep(2000 * time.Millisecond) // wait for final stats to be printed
 	done.Store(true)
 
 	elapsed := time.Since(start)

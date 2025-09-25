@@ -28,70 +28,69 @@ func (s *Stats) Sub(prev *Stats) Stats {
 	return r
 }
 
-type transaction struct {
+type Transaction struct {
 	clientID uint32
 	ops      []kvs.TransactionOperation
+	lock     sync.Mutex
 }
 
 type Value struct {
 	value   string
-	writer  *transaction
-	readers map[uint32]*transaction
+	writer  *Transaction
+	readers sync.Map //map[uint32]*transaction
 	lock    sync.Mutex
 }
 
 type KVService struct {
-	mp              map[string]*Value
-	mpLock          sync.Mutex
-	transactionLock sync.Mutex
-	transactions    map[uint32]*transaction
-	stats           Stats
-	prevStats       Stats
-	lastPrint       time.Time
+	mp           sync.Map
+	mpLock       sync.Mutex
+	transactions sync.Map //map[uint32]*transaction
+	lastPrint    time.Time
 }
 
 func NewKVService() *KVService {
 	kvs := &KVService{}
-	kvs.mp = make(map[string]*Value)
 	kvs.lastPrint = time.Now()
 	return kvs
 }
 
 func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) error {
 	fmt.Printf("Get %s for transaction %d\n", request.Key, request.TransactionId)
-	kv.transactionLock.Lock()
-	t, ok := kv.transactions[request.TransactionId]
+	t, ok := kv.transactions.Load(request.TransactionId)
+
 	if !ok {
-		t = &transaction{
+		kv.transactions.Store(request.TransactionId, &Transaction{
 			clientID: request.TransactionId,
 			ops:      make([]kvs.TransactionOperation, 0),
-		}
-		kv.transactions[request.TransactionId] = t
+		})
 	} else {
-		t.ops = append(t.ops, kvs.TransactionOperation{
+		transaction := t.(*Transaction)
+		transaction.lock.Lock()
+		transaction.ops = append(transaction.ops, kvs.TransactionOperation{
 			IsRead: true,
 			Key:    request.Key,
 		})
-		kv.transactions[request.TransactionId] = t
+		transaction.lock.Unlock()
 	}
 
-	kv.transactionLock.Unlock()
 	//check if write locked
-	if v, ok := kv.mp[request.Key]; ok && v.writer != nil {
+	v, ok := kv.mp.Load(request.Key)
+	value := v.(*Value)
+	if ok && value.writer != nil {
 		response.Yes = false
 		fmt.Printf("Key %s is write locked for transaction %d\n", request.Key, request.TransactionId)
-		fmt.Printf("Current writer: %v\n", v.writer)
+		fmt.Printf("Current writer: %v\n", value.writer)
 		return nil
 	}
-	//get read lock
-	kv.mp[request.Key].lock.Lock()
-	defer kv.mp[request.Key].lock.Unlock()
-	if v, ok := kv.mp[request.Key]; ok {
-		v.readers[request.TransactionId] = t
-	}
 
-	if v, found := kv.mp[request.Key]; found {
-		response.Value = v.value
+	//get read lock
+	if ok {
+		t, _ := kv.transactions.Load(request.TransactionId)
+		Transaction := t.(*Transaction)
+		value.readers.Store(request.TransactionId, Transaction) // now valid
+		Transaction.lock.Lock()
+		defer Transaction.lock.Unlock()
+		response.Value = value.value
 		response.Yes = true
 	}
 	return nil
@@ -100,28 +99,36 @@ func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) err
 func (kv *KVService) Put(request *kvs.PutRequest, response *kvs.PutResponse) error {
 	fmt.Printf("Put %s for transaction %d\n", request.Key, request.TransactionId)
 	//save transaction operation
-	kv.transactionLock.Lock()
-	t := kv.transactions[request.TransactionId]
-	t.ops = append(t.ops, kvs.TransactionOperation{
-		IsRead: false,
-		Key:    request.Key,
-		Value:  request.Value,
-	})
-	kv.transactions[request.TransactionId] = t
-	kv.transactionLock.Unlock()
+	t, ok := kv.transactions.Load(request.TransactionId)
+	transaction := t.(*Transaction)
+	transaction.lock.Lock()
+	if !ok {
+		kv.transactions.Store(request.TransactionId, Transaction{
+			clientID: request.TransactionId,
+			ops:      make([]kvs.TransactionOperation, 0),
+		})
+	} else {
+		transaction.ops = append(transaction.ops, kvs.TransactionOperation{
+			IsRead: false,
+			Key:    request.Key,
+			Value:  request.Value,
+		})
+	}
+	transaction.lock.Unlock()
 
 	//check if write locked
-	if v, ok := kv.mp[request.Key]; ok && v.writer != nil && len(v.readers) <= 1 && v.readers[request.TransactionId] != nil {
+	v, ok := kv.mp.Load(request.Key)
+	value := v.(*Value)
+
+	if ok && value.writer != nil && value.writer.clientID != request.TransactionId {
 		//someone else has the write lock
 		response.Yes = false
 		fmt.Printf("Key %s is write locked for transaction %d\n", request.Key, request.TransactionId)
-		fmt.Printf("Current writer: %v\n", v.writer)
+		fmt.Printf("Current writer: %v\n", value.writer)
 		return nil
 	} else {
 		//get write lock
-		if v, ok := kv.mp[request.Key]; ok {
-			v.writer = t
-		}
+		value.writer = transaction
 		fmt.Printf("Put %s : %s\n", request.Key, request.Value)
 	}
 
@@ -133,22 +140,27 @@ func (kv *KVService) Put(request *kvs.PutRequest, response *kvs.PutResponse) err
 func (kv *KVService) Commit(request *kvs.CommitRequest, response *kvs.CommitResponse) error {
 	transactionId := request.TransactionId
 	fmt.Printf("Committing transaction %d\n", transactionId)
-	kv.transactionLock.Lock()
-	defer kv.transactionLock.Unlock()
-	transaction, ok := kv.transactions[transactionId]
+	t, ok := kv.transactions.Load(transactionId)
+	transaction := t.(*Transaction)
+	transaction.lock.Lock()
+	defer transaction.lock.Unlock()
 
 	if ok {
+		fmt.Printf("transaction ops: %v\n", transaction.ops)
 		for _, op := range transaction.ops {
+			v, _ := kv.mp.Load(op.Key)
+			Value := v.(*Value)
 			if op.IsRead {
-				kv.mp[op.Key].lock.Lock()
-				kv.mp[op.Key].readers[transactionId] = nil
-				kv.mp[op.Key].lock.Unlock()
+				Value.lock.Lock()
+				Value.readers.Delete(transactionId)
+				Value.lock.Unlock()
 			} else {
-				kv.mp[op.Key].value = op.Value
-				kv.mp[op.Key].writer = nil
+				fmt.Printf("Setting key %s to value %s in commit\n", op.Key, op.Value)
+				Value.value = op.Value
+				Value.writer = nil
 			}
 		}
-		delete(kv.transactions, transactionId)
+		kv.transactions.Delete(request.TransactionId)
 		response.Ack = true
 		return nil
 	}
@@ -159,21 +171,23 @@ func (kv *KVService) Commit(request *kvs.CommitRequest, response *kvs.CommitResp
 func (kv *KVService) Abort(request *kvs.CommitRequest, response *kvs.AbortResponse) error {
 	transactionId := request.TransactionId
 	fmt.Printf("Aborting transaction %d\n", transactionId)
-	kv.transactionLock.Lock()
-	defer kv.transactionLock.Unlock()
-	transaction, ok := kv.transactions[request.TransactionId]
+	t, ok := kv.transactions.Load(transactionId)
+	transaction := t.(*Transaction)
+	transaction.lock.Lock()
+	defer transaction.lock.Unlock()
 	if ok {
 		for _, op := range transaction.ops {
+			v, _ := kv.mp.Load(op.Key)
+			Value := v.(*Value)
 			if op.IsRead {
-				fmt.Printf("Aborting read lock on %s for tran id %d\n", op.Key, transactionId)
-				kv.mp[op.Key].lock.Lock()
-				kv.mp[op.Key].readers[transactionId] = nil
-				kv.mp[op.Key].lock.Unlock()
+				Value.lock.Lock()
+				Value.readers.Delete(transactionId)
+				Value.lock.Unlock()
 			} else {
-				kv.mp[op.Key].writer = nil
+				Value.writer = nil
 			}
 		}
-		delete(kv.transactions, request.TransactionId)
+		kv.transactions.Delete(request.TransactionId)
 		response.Ack = true
 		return nil
 	}
@@ -181,15 +195,12 @@ func (kv *KVService) Abort(request *kvs.CommitRequest, response *kvs.AbortRespon
 }
 
 func (kv *KVService) InitializeAccount(request *kvs.InitializeAccountRequest, response *kvs.InitializeAccountResponse) error {
-	kv.mpLock.Lock()
-	defer kv.mpLock.Unlock()
 
-	kv.mp[request.Key] = &Value{
-		value:   request.Value,
-		writer:  nil,
-		readers: make(map[uint32]*transaction),
-	}
-	kv.transactions = make(map[uint32]*transaction)
+	kv.mp.Store(request.Key, &Value{
+		value:  request.Value,
+		writer: nil,
+	})
+	kv.transactions = sync.Map{}
 
 	fmt.Printf("Initialized account %s with value %s\n", request.Key, request.Value)
 
@@ -198,13 +209,11 @@ func (kv *KVService) InitializeAccount(request *kvs.InitializeAccountRequest, re
 }
 
 func (kv *KVService) GetAccountBalance(request *kvs.GetSumRequest, response *kvs.GetSumResponse) error {
-	kv.mpLock.Lock()
-	kv.stats.gets++
 
-	if value, found := kv.mp[request.Key]; found {
+	if v, found := kv.mp.Load(request.Key); found {
+		value := v.(*Value)
 		response.Value = value.value
 	}
-	kv.mpLock.Unlock()
 
 	return nil
 }
