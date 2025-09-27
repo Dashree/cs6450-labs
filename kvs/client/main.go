@@ -20,6 +20,7 @@ import (
 var reqBatchsize uint32
 var workloadsPerHost uint32
 var numberOfAccountsperClient int
+var continueAborting bool
 
 func getHostForKey(key string, numHosts int) int {
 	if numHosts <= 0 {
@@ -96,8 +97,6 @@ func (clients *Clients) Begin(clientId int, src int, dst int, amountToTransfer i
 	transactionId := uuid.New()
 	fmt.Printf("Begin for %d \n", transactionId.ID())
 
-	//Generate transaction ID
-	//include Client ID
 	for {
 		serverList := []int{} //keeps track of index into clients.clients
 		srcindex := getHostForKey(toString(src), len(clients.Clients))
@@ -109,29 +108,55 @@ func (clients *Clients) Begin(clientId int, src int, dst int, amountToTransfer i
 		var srcresponse kvs.GetResponse
 		var dstresponse kvs.GetResponse
 		srcresponse = clients.Clients[srcindex].Get(toString(src), clientId, transactionId)
-		dstresponse = clients.Clients[dstindex].Get(toString(dst), clientId, transactionId)
-		fmt.Printf("src get: %t \n", srcresponse.Ack)
-		fmt.Printf("dst get: %t \n", dstresponse.Ack)
 
-		if (!srcresponse.Ack) || (!dstresponse.Ack) || toInteger(dstresponse.Value) < amountToTransfer {
+		if !srcresponse.Ack {
 			fmt.Printf("aborting on get \n")
 			clients.Abort(transactionId, serverList)
-			return
-		}
+			// time.Sleep(5 * time.Second)
+			if !continueAborting {
+				return
+			}
+			continue
 
+		}
 		srcputresponse := clients.Clients[srcindex].Put(toString(src), toString(toInteger(srcresponse.Value)+amountToTransfer), clientId, transactionId)
 		if !srcputresponse.Ack {
 			fmt.Printf("aborting on put src\n")
 
 			clients.Abort(transactionId, serverList)
-			return
+			// time.Sleep(5 * time.Second)
+
+			if continueAborting {
+				continue
+			} else {
+				return
+			}
 		}
+
+		dstresponse = clients.Clients[dstindex].Get(toString(dst), clientId, transactionId)
+		if (!dstresponse.Ack) || toInteger(dstresponse.Value) < amountToTransfer {
+			fmt.Printf("aborting on get dst \n")
+			clients.Abort(transactionId, serverList)
+			// time.Sleep(5 * time.Second)
+
+			if !continueAborting {
+				return
+			}
+			continue
+		}
+
 		dstputresponse := clients.Clients[dstindex].Put(toString(dst), toString(toInteger(dstresponse.Value)-amountToTransfer), clientId, transactionId)
 		if !dstputresponse.Ack {
 			fmt.Printf("aborting on put dst\n")
 
 			clients.Abort(transactionId, serverList)
-			return
+			// time.Sleep(5 * time.Second)
+
+			if continueAborting {
+				continue
+			} else {
+				return
+			}
 		}
 		fmt.Printf("Commiting \n")
 		clients.Commit(transactionId, serverList)
@@ -143,9 +168,14 @@ func (clients *Clients) Commit(transactionId uuid.UUID, serverList []int) {
 	//Contact all servers involved in transaction
 	//server should do all puts that are pending
 	//server should drop all locks
-	for _, serverIdx := range serverList {
+	for i, serverIdx := range serverList {
+		lead := false
+		if i == 0 {
+			lead = true
+		}
 		request := kvs.CommitRequest{
 			TransactionId: transactionId.ID(),
+			Lead:          lead,
 		}
 		response := kvs.CommitResponse{}
 		err := clients.Clients[serverIdx].rpcClient.Call("KVService.Commit", &request, &response)
@@ -161,9 +191,14 @@ func (clients *Clients) Abort(transactionId uuid.UUID, serverList []int) {
 	//Contact all servers involved in transaction
 	//server should discard all puts that are pending
 	//server should drop all locks
-	for _, serverIdx := range serverList {
+	for i, serverIdx := range serverList {
+		lead := false
+		if i == 0 {
+			lead = true
+		}
 		request := kvs.AbortRequest{
 			TransactionId: transactionId.ID(),
+			Lead:          lead,
 		}
 		response := kvs.AbortResponse{}
 		err := clients.Clients[serverIdx].rpcClient.Call("KVService.Abort", &request, &response)
@@ -246,7 +281,7 @@ func main() {
 	flag.Var(&hosts, "hosts", "Comma-separated list of host:ports to connect to")
 	theta := flag.Float64("theta", 0.99, "Zipfian distribution skew parameter")
 	workload := flag.String("workload", "YCSB-B", "Workload type (YCSB-A, YCSB-B, YCSB-C)")
-	secs := flag.Int("secs", 3, "Duration in seconds for each client to run")
+	secs := flag.Int("secs", 8, "Duration in seconds for each client to run")
 	clientID := flag.Int("clientid", -1, "Relative client ID starting at 0")
 	reqBatchsize = uint32(*flag.Uint64("batch-size", 8, "Batch for Get Requests"))
 	workloadsPerHost = uint32(*flag.Uint64("thrds-per-host", 8, "Number of go routines per hosts"))
@@ -267,7 +302,7 @@ func main() {
 	)
 
 	//start := time.Now()
-
+	continueAborting = true
 	done := atomic.Bool{}
 
 	for j := 0; j < numberOfAccountsperClient; j++ {
@@ -279,8 +314,9 @@ func main() {
 
 	time.Sleep(time.Duration(*secs) * time.Second)
 	done.Store(true)
+	continueAborting = false
 
-	time.Sleep(1 * time.Second) // wait one second
+	time.Sleep(3 * time.Second) // wait one second
 	getTotal(hosts)
 	time.Sleep(1 * time.Second) // wait one second
 

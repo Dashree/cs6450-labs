@@ -13,18 +13,15 @@ import (
 	"github.com/rstutsman/cs6450-labs/kvs"
 )
 
-var numShards uint64
-var enableCache bool
-
 type Stats struct {
-	puts uint64
-	gets uint64
+	commits uint64
+	aborts  uint64
 }
 
 func (s *Stats) Sub(prev *Stats) Stats {
 	r := Stats{}
-	r.puts = s.puts - prev.puts
-	r.gets = s.gets - prev.gets
+	r.commits = s.commits - prev.commits
+	r.aborts = s.aborts - prev.aborts
 	return r
 }
 
@@ -43,6 +40,8 @@ type KVService struct {
 	sync.Mutex
 	mp           map[string]Value
 	transactions map[uint32]*transaction
+	stats        Stats
+	prevStats    Stats
 	lastPrint    time.Time
 }
 
@@ -56,7 +55,8 @@ func NewKVService() *KVService {
 
 func (kv *KVService) addToTransaction(transactionId uint32, op kvs.TransactionOperation) *transaction {
 	var retval *transaction
-	if t, found := kv.transactions[transactionId]; !found {
+	t, found := kv.transactions[transactionId]
+	if !found {
 		t = &transaction{
 			id:  transactionId,
 			ops: make([]kvs.TransactionOperation, 0),
@@ -87,11 +87,10 @@ func (kv *KVService) getValue(Key string) Value {
 func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) error {
 	kv.Lock()
 	defer kv.Unlock()
-	fmt.Printf("getting %s for transaction %d \n", request.Key, request.TrasactionId)
 	transaction := kv.addToTransaction(uint32(request.TrasactionId), kvs.TransactionOperation{IsRead: true, Key: request.Key})
 
 	value := kv.getValue(request.Key)
-	if value.writer != nil {
+	if value.writer != nil && value.writer.id != uint32(request.TrasactionId) {
 		response.Ack = false
 		return nil
 	} else {
@@ -106,31 +105,36 @@ func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) err
 func (kv *KVService) Put(request *kvs.PutRequest, response *kvs.PutResponse) error {
 	kv.Lock()
 	defer kv.Unlock()
-	fmt.Printf("putting %s for transaction %d \n", request.Key, request.TrasactionId)
 
 	transaction := kv.addToTransaction(uint32(request.TrasactionId), kvs.TransactionOperation{IsRead: false, Key: request.Key, Value: request.Value})
 
-	//if no locks then do this
 	value := kv.getValue(request.Key)
 	_, found := value.readers[request.TrasactionId]
-	if value.writer != nil || (found && len(value.readers) > 1) || (!found && len(value.readers) > 0) {
-		fmt.Printf("aborting on put \n")
-		fmt.Printf("found y/n %t\n", found)
-		fmt.Printf("lenght of readers %d", len(value.readers))
+	if value.writer != nil && value.writer.id != request.TrasactionId {
+		fmt.Printf("writer taken by someone else")
+		//if writer is held by someone else
 		response.Ack = false
-		return nil
+	} else if (found && len(value.readers) > 1) || (!found && len(value.readers) > 0) {
+		// fmt.Printf("reader in the way\n")
+		// fmt.Printf("len of readers %d", len(value.readers))
+		//if readers contains someone else other than transaction
+		response.Ack = false
 	} else {
-		//write read lock
+		//get write lock
 		value.writer = transaction
 		response.Ack = true
+		kv.mp[request.Key] = value
 	}
+
 	return nil
 }
 
 func (kv *KVService) Commit(request *kvs.CommitRequest, response *kvs.CommitResponse) error {
 	kv.Lock()
 	defer kv.Unlock()
-	fmt.Printf("commiting for transaction %d \n", request.TransactionId)
+	if request.Lead {
+		kv.stats.commits++
+	}
 
 	transactionId := request.TransactionId
 	transaction := kv.transactions[transactionId]
@@ -140,7 +144,6 @@ func (kv *KVService) Commit(request *kvs.CommitRequest, response *kvs.CommitResp
 			//skip
 		} else {
 			v.writer = nil
-			fmt.Printf("new value %s \n", op.Value)
 			v.value = op.Value
 		}
 		delete(v.readers, transactionId)
@@ -156,7 +159,9 @@ func (kv *KVService) Commit(request *kvs.CommitRequest, response *kvs.CommitResp
 func (kv *KVService) Abort(request *kvs.CommitRequest, response *kvs.AbortResponse) error {
 	kv.Lock()
 	defer kv.Unlock()
-	fmt.Printf("aborting for transaction %d \n", request.TransactionId)
+	if request.Lead {
+		kv.stats.aborts++
+	}
 
 	transactionId := request.TransactionId
 	transaction := kv.transactions[transactionId]
@@ -178,7 +183,8 @@ func (kv *KVService) Abort(request *kvs.CommitRequest, response *kvs.AbortRespon
 }
 
 func (kv *KVService) GetAccountBalance(request *kvs.GetSumRequest, response *kvs.GetSumResponse) error {
-
+	kv.Lock()
+	defer kv.Unlock()
 	if v, found := kv.mp[request.Key]; found {
 		response.Value = v.value
 	}
@@ -187,29 +193,29 @@ func (kv *KVService) GetAccountBalance(request *kvs.GetSumRequest, response *kvs
 }
 
 func (kv *KVService) printStats() {
-	// kv.Lock()
-	// stats := kv.stats
-	// prevStats := kv.prevStats
-	// kv.prevStats = stats
-	// now := time.Now()
-	// lastPrint := kv.lastPrint
-	// kv.lastPrint = now
-	// kv.Unlock()
+	kv.Lock()
+	commits := kv.stats
+	prevCommits := kv.prevStats
+	kv.prevStats = commits
+	now := time.Now()
+	lastPrint := kv.lastPrint
+	kv.lastPrint = now
+	kv.Unlock()
 
-	// diff := stats.Sub(&prevStats)
-	// deltaS := now.Sub(lastPrint).Seconds()
+	diff := commits.Sub(&prevCommits)
+	deltaS := now.Sub(lastPrint).Seconds()
 
-	// fmt.Printf("get/s %0.2f\nput/s %0.2f\nops/s %0.2f\n\n",
-	// 	float64(diff.gets)/deltaS,
-	// 	float64(diff.puts)/deltaS,
-	// 	float64(diff.gets+diff.puts)/deltaS)
+	fmt.Printf("aborts/s %0.2f\ncommits/s %0.2f\nops/s %0.2f\n\n",
+		float64(diff.aborts)/deltaS,
+		float64(diff.commits)/deltaS,
+		float64(diff.aborts+diff.commits)/deltaS)
 }
 
 func main() {
 	port := flag.String("port", "8080", "Port to run the server on")
-	numShards = *flag.Uint64("num-shards", 1, "Number of Shards in the KVStore")
+	// numShards = *flag.Uint64("num-shards", 1, "Number of Shards in the KVStore")
 	//mapAllocCount := *flag.Uint64("alloc", 400_000, "Number expected for keys per shard")
-	enableCache = *flag.Bool("cache", false, "Use cached values for string storage")
+	// enableCache = *flag.Bool("cache", false, "Use cached values for string storage")
 	flag.Parse()
 
 	kvs := NewKVService()
@@ -221,7 +227,7 @@ func main() {
 		log.Fatal("listen error:", e)
 	}
 
-	fmt.Printf("Starting KVS server on :%s %t\n", *port, enableCache)
+	fmt.Printf("Starting KVS server on :%s\n", *port)
 
 	go func() {
 		for {

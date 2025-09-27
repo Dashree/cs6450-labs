@@ -24,6 +24,7 @@ type GetResponse struct {
 
 type CommitRequest struct {
 	TransactionId uint32
+	Lead          bool
 }
 
 type CommitResponse struct {
@@ -32,6 +33,7 @@ type CommitResponse struct {
 
 type AbortRequest struct {
 	TransactionId uint32
+	Lead          bool
 }
 
 type AbortResponse struct {
