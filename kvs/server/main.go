@@ -16,21 +16,17 @@ import (
 
 const numShards = 64
 
-// ---------------- Stats ----------------
+// ---------------- Stats (keep simple: get/put/ops) ----------------
 
 type Stats struct {
-	gets        uint64
-	puts        uint64
-	commitsLead uint64
-	abortsLead  uint64
+	gets uint64
+	puts uint64
 }
 
 func (s *Stats) Sub(prev *Stats) Stats {
 	return Stats{
-		gets:        s.gets - prev.gets,
-		puts:        s.puts - prev.puts,
-		commitsLead: s.commitsLead - prev.commitsLead,
-		abortsLead:  s.abortsLead - prev.abortsLead,
+		gets: s.gets - prev.gets,
+		puts: s.puts - prev.puts,
 	}
 }
 
@@ -168,6 +164,7 @@ func (kv *KVService) Get(req *kvs.GetRequest, resp *kvs.GetResponse) error {
 
 	// no-wait S-lock
 	if l.writer != "" && l.writer != req.Txid {
+		resp.ClientID = req.ClientID
 		resp.Granted = false
 		return nil
 	}
@@ -181,6 +178,7 @@ func (kv *KVService) Get(req *kvs.GetRequest, resp *kvs.GetResponse) error {
 	} else {
 		resp.Value = sh.mp[req.Key]
 	}
+	resp.ClientID = req.ClientID
 	resp.Granted = true
 
 	kv.muStats.Lock()
@@ -202,17 +200,19 @@ func (kv *KVService) Put(req *kvs.PutRequest, resp *kvs.PutResponse) error {
 
 	// no-wait X-lock
 	if l.writer == req.Txid {
-		// already have X, fine
+		// already have X
 	} else if l.writer != "" && l.writer != req.Txid {
+		resp.ClientID = req.ClientID
 		resp.Granted = false
 		return nil
 	} else if len(l.readers) > 0 {
-		// if readers exist and any reader is not me -> deny
-		if _, onlyMe := l.readers[req.Txid]; !onlyMe || len(l.readers) > 1 {
+		// readers exist: allow upgrade only if the only reader is me
+		if _, iAmReader := l.readers[req.Txid]; !iAmReader || len(l.readers) > 1 {
+			resp.ClientID = req.ClientID
 			resp.Granted = false
 			return nil
 		}
-		// upgrade S->X: remove my S
+		// upgrade S->X
 		delete(l.readers, req.Txid)
 		l.writer = req.Txid
 	} else {
@@ -224,6 +224,7 @@ func (kv *KVService) Put(req *kvs.PutRequest, resp *kvs.PutResponse) error {
 	tx.writeLocks[req.Key] = true
 	delete(tx.readLocks, req.Key) // upgraded if present
 
+	resp.ClientID = req.ClientID
 	resp.Granted = true
 
 	kv.muStats.Lock()
@@ -232,14 +233,16 @@ func (kv *KVService) Put(req *kvs.PutRequest, resp *kvs.PutResponse) error {
 	return nil
 }
 
-// ---------------- RPC: Commit / Abort ----------------
+// ---------------- RPC: Commit / Abort (no leader) ----------------
 
-func (kv *KVService) Commit(req *kvs.CommitRequest, _ *kvs.CommitResponse) error {
+func (kv *KVService) Commit(req *kvs.CommitRequest, resp *kvs.CommitResponse) error {
+	resp.ClientID = req.ClientID
+
 	kv.muTx.Lock()
 	tx, ok := kv.txs[req.Txid]
 	kv.muTx.Unlock()
 	if !ok {
-		// nothing to do; idempotent
+		// idempotent
 		return nil
 	}
 
@@ -252,19 +255,16 @@ func (kv *KVService) Commit(req *kvs.CommitRequest, _ *kvs.CommitResponse) error
 		sh.mu.Unlock()
 	}
 
-	// release locks and clean
+	// release locks and remove tx
 	kv.releaseLocks(tx)
 	kv.deleteTx(req.Txid)
 
-	if req.Lead {
-		kv.muStats.Lock()
-		kv.stats.commitsLead++
-		kv.muStats.Unlock()
-	}
 	return nil
 }
 
-func (kv *KVService) Abort(req *kvs.AbortRequest, _ *kvs.AbortResponse) error {
+func (kv *KVService) Abort(req *kvs.AbortRequest, resp *kvs.AbortResponse) error {
+	resp.ClientID = req.ClientID
+
 	kv.muTx.Lock()
 	tx, ok := kv.txs[req.Txid]
 	kv.muTx.Unlock()
@@ -272,40 +272,30 @@ func (kv *KVService) Abort(req *kvs.AbortRequest, _ *kvs.AbortResponse) error {
 		kv.releaseLocks(tx)
 		kv.deleteTx(req.Txid)
 	}
-	if req.Lead {
-		kv.muStats.Lock()
-		kv.stats.abortsLead++
-		kv.muStats.Unlock()
-	}
 	return nil
 }
 
 // ---------------- Stats printer ----------------
 
 func (kv *KVService) printStats() {
-    kv.muStats.Lock()
-    stats := kv.stats
-    prev := kv.prev
-    kv.prev = stats
-    now := time.Now()
-    last := kv.last
-    kv.last = now
-    kv.muStats.Unlock()
+	kv.muStats.Lock()
+	stats := kv.stats
+	prev := kv.prev
+	kv.prev = stats
+	now := time.Now()
+	last := kv.last
+	kv.last = now
+	kv.muStats.Unlock()
 
-    diff := stats.Sub(&prev)
-    secs := now.Sub(last).Seconds()
+	diff := stats.Sub(&prev)
+	secs := now.Sub(last).Seconds()
 
-    getRate    := float64(diff.gets)        / secs
-    putRate    := float64(diff.puts)        / secs
-    opRate     := float64(diff.gets+diff.puts) / secs
-    commitRate := float64(diff.commitsLead) / secs
-    abortRate  := float64(diff.abortsLead)  / secs
+	getRate := float64(diff.gets) / secs
+	putRate := float64(diff.puts) / secs
+	opRate := float64(diff.gets+diff.puts) / secs
 
-    // IMPORTANT: include "ops/s" so the report script can find it
-    fmt.Printf("get/s %.2f put/s %.2f ops/s %.2f commit/s %.2f abort/s %.2f\n",
-        getRate, putRate, opRate, commitRate, abortRate)
+	fmt.Printf("get/s %.2f put/s %.2f ops/s %.2f\n", getRate, putRate, opRate)
 }
-
 
 func main() {
 	port := flag.String("port", "8080", "Port to run the server on")

@@ -5,9 +5,10 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log"
+	"math/rand"
 	"net/rpc"
+	"os"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -24,13 +25,33 @@ func shardIdxByHosts(key string, n int) int {
 	return int(h.Sum32() % uint32(n))
 }
 
+// ---------------- Dial helpers (robust) ----------------
+
+func mustDialHTTP(addr string) *rpc.Client {
+	backoff := 100 * time.Millisecond
+	deadline := time.Now().Add(90 * time.Second)
+	for {
+		if c, err := rpc.DialHTTP("tcp", addr); err == nil {
+			return c
+		}
+		if time.Now().After(deadline) {
+			log.Fatalf("kvsclient: timed out dialing %s", addr)
+		}
+		time.Sleep(backoff)
+		// cap backoff
+		if backoff < 2*time.Second {
+			backoff *= 2
+		}
+	}
+}
+
 // ---------------- Client with transactional API ----------------
 
 type Client struct {
 	hosts []string
 	conns map[string]*rpc.Client
 
-	clientID int
+	clientID uint64
 
 	// active tx
 	active       bool
@@ -40,14 +61,10 @@ type Client struct {
 
 var globalSeq uint64
 
-func DialAll(hosts []string, clientID int) *Client {
+func DialAll(hosts []string, clientID uint64) *Client {
 	conns := make(map[string]*rpc.Client, len(hosts))
 	for _, addr := range hosts {
-		rc, err := rpc.DialHTTP("tcp", addr)
-		if err != nil {
-			log.Fatalf("dial %s: %v", addr, err)
-		}
-		conns[addr] = rc
+		conns[addr] = mustDialHTTP(addr)
 	}
 	return &Client{
 		hosts:    hosts,
@@ -86,14 +103,13 @@ func (c *Client) connForKey(key string) (addr string, rc *rpc.Client) {
 func (c *Client) Get(key string) (string, bool) {
 	c.mustActive()
 	addr, rc := c.connForKey(key)
-	req := kvs.GetRequest{Txid: c.txid, Key: key}
+	req := kvs.GetRequest{ClientID: c.clientID, Txid: c.txid, Key: key}
 	var resp kvs.GetResponse
 	if err := rc.Call("KVService.Get", &req, &resp); err != nil {
 		log.Fatal(err)
 	}
 	if !resp.Granted {
-		// implicit abort (no-wait)
-		c.Abort()
+		c.Abort() // implicit abort on lock denial
 		return "", false
 	}
 	c.participants[addr] = true
@@ -103,7 +119,7 @@ func (c *Client) Get(key string) (string, bool) {
 func (c *Client) Put(key, value string) bool {
 	c.mustActive()
 	addr, rc := c.connForKey(key)
-	req := kvs.PutRequest{Txid: c.txid, Key: key, Value: value}
+	req := kvs.PutRequest{ClientID: c.clientID, Txid: c.txid, Key: key, Value: value}
 	var resp kvs.PutResponse
 	if err := rc.Call("KVService.Put", &req, &resp); err != nil {
 		log.Fatal(err)
@@ -118,15 +134,9 @@ func (c *Client) Put(key, value string) bool {
 
 func (c *Client) Commit() {
 	c.mustActive()
-	addrs := make([]string, 0, len(c.participants))
-	for a := range c.participants {
-		addrs = append(addrs, a)
-	}
-	sort.Strings(addrs) // pick deterministic lead
-
-	for i, addr := range addrs {
+	for addr := range c.participants {
 		rc := c.conns[addr]
-		req := kvs.CommitRequest{Txid: c.txid, Lead: i == 0}
+		req := kvs.CommitRequest{ClientID: c.clientID, Txid: c.txid}
 		var resp kvs.CommitResponse
 		if err := rc.Call("KVService.Commit", &req, &resp); err != nil {
 			log.Fatal(err)
@@ -139,15 +149,9 @@ func (c *Client) Abort() {
 	if !c.active {
 		return
 	}
-	addrs := make([]string, 0, len(c.participants))
-	for a := range c.participants {
-		addrs = append(addrs, a)
-	}
-	sort.Strings(addrs) // pick deterministic lead
-
-	for i, addr := range addrs {
+	for addr := range c.participants {
 		rc := c.conns[addr]
-		req := kvs.AbortRequest{Txid: c.txid, Lead: i == 0}
+		req := kvs.AbortRequest{ClientID: c.clientID, Txid: c.txid}
 		var resp kvs.AbortResponse
 		if err := rc.Call("KVService.Abort", &req, &resp); err != nil {
 			log.Fatal(err)
@@ -173,7 +177,7 @@ type txOp struct {
 
 // YCSB-B: 3 ops per tx, retry AS IS on abort
 func runYCSBClients(hosts []string, theta float64, secs int, resultsCh chan<- uint64, id int) {
-	c := DialAll(hosts, id)
+	client := DialAll(hosts, uint64(id))
 	wl := kvs.NewWorkload("YCSB-B", theta)
 	value := strings.Repeat("x", 128)
 
@@ -191,17 +195,17 @@ func runYCSBClients(hosts []string, theta float64, secs int, resultsCh chan<- ui
 
 		// retry loop for this tx
 		for {
-			c.Begin()
+			client.Begin()
 			aborted := false
 
 			for _, op := range ops {
 				if op.get {
-					if _, ok := c.Get(op.key); !ok {
+					if _, ok := client.Get(op.key); !ok {
 						aborted = true
 						break
 					}
 				} else {
-					if ok := c.Put(op.key, value); !ok {
+					if ok := client.Put(op.key, value); !ok {
 						aborted = true
 						break
 					}
@@ -210,10 +214,10 @@ func runYCSBClients(hosts []string, theta float64, secs int, resultsCh chan<- ui
 			}
 
 			if aborted {
-				// Abort already sent by Get/Put; just retry AS IS
+				// Abort already sent; retry AS IS
 				continue
 			}
-			c.Commit()
+			client.Commit()
 			break
 		}
 	}
@@ -222,35 +226,35 @@ func runYCSBClients(hosts []string, theta float64, secs int, resultsCh chan<- ui
 
 // Payment / strict-serializable workload ("xfer")
 func runXferClients(hosts []string, secs int, id int, resultsCh chan<- uint64) {
-	c := DialAll(hosts, id)
+	client := DialAll(hosts, uint64(id))
 	opsCompleted := uint64(0)
 
 	acctKey := func(i int) string { return fmt.Sprintf("acct:%d", i) }
 
 	// client 0 initializes and sets start flag
 	if id == 0 {
-		c.Begin()
+		client.Begin()
 		for i := 0; i < 10; i++ {
-			c.Put(acctKey(i), "1000")
+			client.Put(acctKey(i), "1000")
 			opsCompleted++
 		}
-		c.Commit()
+		client.Commit()
 
 		// set start flag
-		c.Begin()
-		c.Put("__start__", "1")
-		c.Commit()
+		client.Begin()
+		client.Put("__start__", "1")
+		client.Commit()
 	}
 
 	// wait for start flag
 	for {
-		c.Begin()
-		v, ok := c.Get("__start__")
+		client.Begin()
+		v, ok := client.Get("__start__")
 		if ok && v == "1" {
-			c.Commit()
+			client.Commit()
 			break
 		}
-		c.Abort()
+		client.Abort()
 		time.Sleep(50 * time.Millisecond)
 	}
 
@@ -261,45 +265,44 @@ func runXferClients(hosts []string, secs int, id int, resultsCh chan<- uint64) {
 
 		// transfer tx: debit src, credit dst
 		for {
-			c.Begin()
+			client.Begin()
 
-			sBalStr, ok := c.Get(acctKey(src))
+			sBalStr, ok := client.Get(acctKey(src))
 			if !ok {
 				continue // aborted, retry AS IS
 			}
 			sBal, _ := strconv.Atoi(sBalStr)
 			if sBal < 100 {
-				c.Abort()
-				break // nothing to do; try again later
+				client.Abort()
+				break // nothing to do now; try again next loop
 			}
 
-			dBalStr, ok := c.Get(acctKey(dst))
+			dBalStr, ok := client.Get(acctKey(dst))
 			if !ok {
 				continue
 			}
 			dBal, _ := strconv.Atoi(dBalStr)
 
-			// Put src (debit) and dst (credit)
-			if ok := c.Put(acctKey(src), strconv.Itoa(sBal-100)); !ok {
+			if ok := client.Put(acctKey(src), strconv.Itoa(sBal-100)); !ok {
 				continue
 			}
-			if ok := c.Put(acctKey(dst), strconv.Itoa(dBal+100)); !ok {
+			if ok := client.Put(acctKey(dst), strconv.Itoa(dBal+100)); !ok {
 				continue
 			}
 
 			opsCompleted += 4 // two gets + two puts
-			c.Commit()
+			client.Commit()
 			break
 		}
 
 		// occasionally check invariant (sum==10000)
-		if (opsCompleted%200) == 0 {
+		if (opsCompleted % 200) == 0 {
 			for {
-				c.Begin()
+				client.Begin()
 				total := 0
 				okAll := true
 				for i := 0; i < 10; i++ {
-					v, ok := c.Get(acctKey(i))
+					v, ok := client.Get(acctKey(i))
 					if !ok {
 						okAll = false
 						break
@@ -311,10 +314,11 @@ func runXferClients(hosts []string, secs int, id int, resultsCh chan<- uint64) {
 				if !okAll {
 					continue
 				}
-				c.Commit()
+				client.Commit()
 				if total != 10000 {
 					log.Fatalf("Invariant violated: total=%d (expected 10000)", total)
 				}
+				break
 			}
 		}
 	}
@@ -324,23 +328,31 @@ func runXferClients(hosts []string, secs int, id int, resultsCh chan<- uint64) {
 // ---------------- main ----------------
 
 func main() {
+	rand.Seed(time.Now().UnixNano())
+
 	var hosts HostList
 	flag.Var(&hosts, "hosts", "Comma-separated list of host:ports to connect to")
 
 	theta := flag.Float64("theta", 0.99, "Zipfian distribution skew parameter (used by YCSB workloads)")
-	workloadName := flag.String("workload", "YCSB-B", "Workload type: YCSB-A | YCSB-B | YCSB-C | xfer")
+	workloadName := flag.String("workload", "xfer", "Workload type: YCSB-B | xfer")
 	secs := flag.Int("secs", 30, "Duration in seconds for clients to run")
-	clientID := flag.Int("clientid", -1, "Relative client ID starting at 0 (used in xfer)")
+	clientID := flag.Int("clientid", 0, "Relative client ID (set by run-cluster.sh)")
 
 	flag.Parse()
-	_ = clientID // keep the flag compiled-in even if not used below
 
+	// Make this work out-of-the-box with run-cluster.sh (no extra args):
 	if len(hosts) == 0 {
-		hosts = append(hosts, "localhost:8080")
+		if s := os.Getenv("KVS_HOSTS"); s != "" {
+			for _, h := range strings.Split(s, ",") {
+				hosts = append(hosts, strings.TrimSpace(h))
+			}
+		} else {
+			// Fallback to common cluster names; your script uses node0,node1
+			hosts = HostList{"node0:8080", "node1:8080"}
+		}
 	}
-
-	fmt.Printf("hosts %v\ntheta %.2f\nworkload %s\nsecs %d\n",
-		hosts, *theta, *workloadName, *secs)
+	fmt.Printf("kvsclient: connecting to hosts %v (workload=%s secs=%d id=%d)\n",
+		hosts, *workloadName, *secs, *clientID)
 
 	start := time.Now()
 	resultsCh := make(chan uint64)
@@ -355,12 +367,11 @@ func main() {
 		for i := 0; i < 10; i++ {
 			total += <-resultsCh
 		}
-
 	default:
 		clientsPerHost := runtime.NumCPU() * 4
 		for range hosts {
 			for j := 0; j < clientsPerHost; j++ {
-				id := j
+				id := j + (*clientID * 100000) // keep unique-ish ids across nodes
 				go runYCSBClients(hosts, *theta, *secs, resultsCh, id)
 			}
 		}

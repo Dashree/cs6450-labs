@@ -1,37 +1,46 @@
 package kvs
 
-// ---- Transactional messages ----
+// ---------- Transactional messages (with ClientID) ----------
 
 type GetRequest struct {
-	Txid string
-	Key  string
+	ClientID uint64
+	Txid     string
+	Key      string
 }
 
 type GetResponse struct {
-	Value   string
-	Granted bool // false => lock denied (no-wait); client must Abort() and retry AS IS
+	ClientID uint64
+	Value    string
+	Granted  bool // false => lock denied (no-wait); client must Abort() & retry AS IS
 }
 
 type PutRequest struct {
-	Txid  string
-	Key   string
-	Value string
+	ClientID uint64
+	Txid     string
+	Key      string
+	Value    string
 }
 
 type PutResponse struct {
-	Granted bool // false => lock denied (no-wait)
+	ClientID uint64
+	Granted  bool // false => lock denied (no-wait)
 }
 
 type CommitRequest struct {
-	Txid string
-	Lead bool // true on exactly one participant so servers can count commit/s once
+	ClientID uint64
+	Txid     string
 }
 
-type CommitResponse struct{}
+type CommitResponse struct {
+	ClientID uint64
+}
 
 type AbortRequest struct {
-	Txid string
-	Lead bool // true on exactly one participant so servers can count abort/s once
+	ClientID uint64
+	Txid     string
 }
 
-type AbortResponse struct{}
+type AbortResponse struct {
+	ClientID uint64
+}
+
