@@ -115,7 +115,7 @@ func (kv *KVService) Put(request *kvs.PutRequest, response *kvs.PutResponse) err
 	value := kv.getValue(request.Key)
 	_, found := value.readers[request.TrasactionId]
 	if value.writer != nil && value.writer.id != request.TrasactionId {
-		fmt.Printf("writer taken by someone else")
+		// fmt.Printf("writer taken by someone else")
 		//if writer is held by someone else
 		response.Ack = false
 	} else if (found && len(value.readers) > 1) || (!found && len(value.readers) > 0) {

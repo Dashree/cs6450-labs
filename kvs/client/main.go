@@ -95,10 +95,11 @@ func (client *Client) Put(key string, value string, clientId int, transactionId 
 
 func (clients *Clients) Begin(clientId int, transaction []kvs.TransactionOperation) {
 	transactionId := uuid.New()
-	fmt.Printf("Begin for %d \n", transactionId.ID())
+	// fmt.Printf("Begin for %d \n", transactionId.ID())
 	for {
 		serverList := []int{}
 		for _, op := range transaction {
+			fmt.Printf("Operation key: %+v\n", op.Key)
 			serverIdx := getHostForKey(op.Key, len(clients.Clients))
 			if !slices.Contains(serverList, serverIdx) {
 				serverList = append(serverList, serverIdx)
@@ -304,10 +305,9 @@ func runClient(clientId int, addrs []string, workload *kvs.Workload, done *atomi
 		clients.Clients = append(clients.Clients, client)
 	}
 	value := strings.Repeat("x", 128)
-	const batchSize = 1024
-	transaction := make([]kvs.TransactionOperation, 0)
 	for !done.Load() {
-		for j := 0; j < batchSize; j++ {
+		transaction := make([]kvs.TransactionOperation, 0)
+		for j := 0; j < 3; j++ {
 			op := workload.Next()
 			key := fmt.Sprintf("%d", op.Key)
 			if op.IsRead {
@@ -316,9 +316,8 @@ func runClient(clientId int, addrs []string, workload *kvs.Workload, done *atomi
 				transaction = append(transaction, kvs.TransactionOperation{IsRead: false, Key: key, Value: value})
 			}
 
-			//Begin Transaction
-			clients.Begin(clientId, transaction)
 		}
+		clients.Begin(clientId, transaction)
 	}
 }
 
@@ -339,7 +338,7 @@ func main() {
 	flag.Var(&hosts, "hosts", "Comma-separated list of host:ports to connect to")
 	theta := flag.Float64("theta", 0.99, "Zipfian distribution skew parameter")
 	workload := flag.String("workload", "YCSB-B", "Workload type (YCSB-A, YCSB-B, YCSB-C)")
-	secs := flag.Int("secs", 8, "Duration in seconds for each client to run")
+	secs := flag.Int("secs", 30, "Duration in seconds for each client to run")
 	clientID := flag.Int("clientid", -1, "Relative client ID starting at 0")
 	reqBatchsize = uint32(*flag.Uint64("batch-size", 8, "Batch for Get Requests"))
 	workloadsPerHost = uint32(*flag.Uint64("thrds-per-host", 8, "Number of go routines per hosts"))
