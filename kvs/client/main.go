@@ -65,7 +65,7 @@ func Dial(addr string) *Client {
 func (client *Client) Get(key string, clientId int, transactionId uuid.UUID) kvs.GetResponse {
 	request := kvs.GetRequest{
 		Key:          key,
-		TrasactionId: int(transactionId.ID()),
+		TransactionId: int(transactionId.ID()),
 		ClientId:     clientId,
 	}
 	response := kvs.GetResponse{}
@@ -81,7 +81,7 @@ func (client *Client) Put(key string, value string, clientId int, transactionId 
 	request := kvs.PutRequest{
 		Key:          key,
 		Value:        value,
-		TrasactionId: transactionId.ID(),
+		TransactionId: transactionId.ID(),
 		ClientId:     clientId,
 	}
 	response := kvs.PutResponse{}
@@ -99,7 +99,7 @@ func (clients *Clients) Begin(clientId int, transaction []kvs.TransactionOperati
 	for {
 		serverList := []int{}
 		for _, op := range transaction {
-			fmt.Printf("Operation key: %+v\n", op.Key)
+			// fmt.Printf("Operation key: %+v\n", op.Key)
 			serverIdx := getHostForKey(op.Key, len(clients.Clients))
 			if !slices.Contains(serverList, serverIdx) {
 				serverList = append(serverList, serverIdx)
@@ -107,7 +107,7 @@ func (clients *Clients) Begin(clientId int, transaction []kvs.TransactionOperati
 			if op.IsRead {
 				response := clients.Clients[serverIdx].Get(op.Key, clientId, transactionId)
 				if !response.Ack {
-					fmt.Printf("aborting on get \n")
+					// fmt.Printf("aborting on get \n")
 					clients.Abort(transactionId, serverList)
 					if !continueAborting {
 						return
@@ -119,7 +119,7 @@ func (clients *Clients) Begin(clientId int, transaction []kvs.TransactionOperati
 			} else {
 				response := clients.Clients[serverIdx].Put(op.Key, op.Value, clientId, transactionId)
 				if !response.Ack {
-					fmt.Printf("aborting on put\n")
+					// fmt.Printf("aborting on put\n")
 					clients.Abort(transactionId, serverList)
 					if !continueAborting {
 						return
@@ -358,6 +358,7 @@ func main() {
 			"secs %d\n",
 		hosts, *theta, *workload, *secs,
 	)
+	// hosts = append(hosts[:1], hosts[1+1:]...)
 
 	//start := time.Now()
 	continueAborting = true

@@ -3,7 +3,7 @@ package kvs
 type PutRequest struct {
 	Key          string
 	Value        string
-	TrasactionId uint32
+	TransactionId uint32
 	ClientId     int
 }
 
@@ -13,7 +13,7 @@ type PutResponse struct {
 
 type GetRequest struct {
 	Key          string
-	TrasactionId int
+	TransactionId int
 	ClientId     int
 }
 

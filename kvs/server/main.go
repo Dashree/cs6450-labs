@@ -91,10 +91,10 @@ func (kv *KVService) getValue(Key string) Value {
 func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) error {
 	kv.Lock()
 	defer kv.Unlock()
-	transaction := kv.addToTransaction(uint32(request.TrasactionId), kvs.TransactionOperation{IsRead: true, Key: request.Key})
+	transaction := kv.addToTransaction(uint32(request.TransactionId), kvs.TransactionOperation{IsRead: true, Key: request.Key})
 
 	value := kv.getValue(request.Key)
-	if value.writer != nil && value.writer.id != uint32(request.TrasactionId) {
+	if value.writer != nil && value.writer.id != uint32(request.TransactionId) {
 		response.Ack = false
 		return nil
 	} else {
@@ -110,11 +110,11 @@ func (kv *KVService) Put(request *kvs.PutRequest, response *kvs.PutResponse) err
 	kv.Lock()
 	defer kv.Unlock()
 
-	transaction := kv.addToTransaction(uint32(request.TrasactionId), kvs.TransactionOperation{IsRead: false, Key: request.Key, Value: request.Value})
+	transaction := kv.addToTransaction(uint32(request.TransactionId), kvs.TransactionOperation{IsRead: false, Key: request.Key, Value: request.Value})
 
 	value := kv.getValue(request.Key)
-	_, found := value.readers[request.TrasactionId]
-	if value.writer != nil && value.writer.id != request.TrasactionId {
+	_, found := value.readers[request.TransactionId]
+	if value.writer != nil && value.writer.id != request.TransactionId {
 		// fmt.Printf("writer taken by someone else")
 		//if writer is held by someone else
 		response.Ack = false
@@ -160,7 +160,7 @@ func (kv *KVService) Commit(request *kvs.CommitRequest, response *kvs.CommitResp
 	return nil
 }
 
-func (kv *KVService) Abort(request *kvs.CommitRequest, response *kvs.AbortResponse) error {
+func (kv *KVService) Abort(request *kvs.AbortRequest, response *kvs.AbortResponse) error {
 	kv.Lock()
 	defer kv.Unlock()
 	if request.Lead {
