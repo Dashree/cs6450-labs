@@ -13,6 +13,28 @@ import (
 	"github.com/rstutsman/cs6450-labs/kvs"
 )
 
+type TxStatus int
+
+const (
+	Pending TxStatus = iota
+	Committed
+	Aborted
+)
+
+type Transaction struct {
+	TxID     string
+	ReadSet  map[string]bool
+	WriteSet map[string]string
+	Status   TxStatus
+}
+
+type KeyEntry struct {
+	Value   string
+	Readers map[string]bool // txID -> true
+	Writer  string          // txID
+}
+
+
 type Stats struct {
 	commits uint64
 	aborts  uint64
@@ -40,6 +62,8 @@ type KVService struct {
 	sync.Mutex
 	mp           map[string]Value
 	transactions map[uint32]*transaction
+
+
 	stats        Stats
 	prevStats    Stats
 	lastPrint    time.Time
@@ -84,103 +108,151 @@ func (kv *KVService) getValue(Key string) Value {
 	return value
 }
 
-func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) error {
+func (kv *KVService) TxnGet(req *kvs.TxnRequest, res *kvs.TxnResponse) error {
 	kv.Lock()
 	defer kv.Unlock()
-	transaction := kv.addToTransaction(uint32(request.TrasactionId), kvs.TransactionOperation{IsRead: true, Key: request.Key})
 
-	value := kv.getValue(request.Key)
-	if value.writer != nil && value.writer.id != uint32(request.TrasactionId) {
-		response.Ack = false
+	tx, ok := kv.transactions[req.TxID]
+	if !ok {
+		tx = &Transaction{
+			TxID: req.TxID,
+			ReadSet: make(map[string]bool),
+			WriteSet: make(map[string]string),
+			Status: Pending,
+		}
+		kv.transactions[req.TxID] = tx
+	}
+
+	// Check if client already wrote this key
+	if val, found := tx.WriteSet[req.Key]; found {
+		res.Value = val
+		res.Ok = true
 		return nil
-	} else {
-		//get read lock
-		value.readers[transaction.id] = transaction
-		response.Ack = true
-		response.Value = value.value
 	}
+
+	entry, found := kv.data[req.Key]
+	if !found {
+		entry = &KeyEntry{Value: "", Readers: make(map[string]bool)}
+		kv.data[req.Key] = entry
+	}
+
+	// Try to acquire shared lock
+	if entry.Writer != "" && entry.Writer != req.TxID {
+		res.Ok = false
+		return nil // lock held by another txn
+	}
+
+	entry.Readers[req.TxID] = true
+	tx.ReadSet[req.Key] = true
+	res.Value = entry.Value
+	res.Ok = true
+	kv.stats.gets++
 	return nil
 }
 
-func (kv *KVService) Put(request *kvs.PutRequest, response *kvs.PutResponse) error {
+
+func (kv *KVService) TxnPut(req *kvs.TxnRequest, res *kvs.TxnResponse) error {
 	kv.Lock()
 	defer kv.Unlock()
 
-	transaction := kv.addToTransaction(uint32(request.TrasactionId), kvs.TransactionOperation{IsRead: false, Key: request.Key, Value: request.Value})
-
-	value := kv.getValue(request.Key)
-	_, found := value.readers[request.TrasactionId]
-	if value.writer != nil && value.writer.id != request.TrasactionId {
-		fmt.Printf("writer taken by someone else")
-		//if writer is held by someone else
-		response.Ack = false
-	} else if (found && len(value.readers) > 1) || (!found && len(value.readers) > 0) {
-		// fmt.Printf("reader in the way\n")
-		// fmt.Printf("len of readers %d", len(value.readers))
-		//if readers contains someone else other than transaction
-		response.Ack = false
-	} else {
-		//get write lock
-		value.writer = transaction
-		response.Ack = true
-		kv.mp[request.Key] = value
-	}
-
-	return nil
-}
-
-func (kv *KVService) Commit(request *kvs.CommitRequest, response *kvs.CommitResponse) error {
-	kv.Lock()
-	defer kv.Unlock()
-	if request.Lead {
-		kv.stats.commits++
-	}
-
-	transactionId := request.TransactionId
-	transaction := kv.transactions[transactionId]
-	for _, op := range transaction.ops {
-		v := kv.mp[op.Key]
-		if op.IsRead {
-			//skip
-		} else {
-			v.writer = nil
-			v.value = op.Value
+	tx, ok := kv.transactions[req.TxID]
+	if !ok {
+		tx = &Transaction{
+			TxID: req.TxID,
+			ReadSet: make(map[string]bool),
+			WriteSet: make(map[string]string),
+			Status: Pending,
 		}
-		delete(v.readers, transactionId)
-		kv.mp[op.Key] = v
+		kv.transactions[req.TxID] = tx
 	}
-	response.Ack = true
-	delete(kv.transactions, transactionId)
-	//free locks
 
+	entry, found := kv.data[req.Key]
+	if !found {
+		entry = &KeyEntry{Value: "", Readers: make(map[string]bool)}
+		kv.data[req.Key] = entry
+	}
+
+	// Try to acquire exclusive lock
+	if (entry.Writer != "" && entry.Writer != req.TxID) ||
+		(len(entry.Readers) > 0 && !(len(entry.Readers) == 1 && entry.Readers[req.TxID])) {
+		res.Ok = false
+		return nil // Cannot acquire exclusive lock
+	}
+
+	entry.Writer = req.TxID
+	delete(entry.Readers, req.TxID) // Upgrade from shared to exclusive if needed
+	tx.WriteSet[req.Key] = req.Value
+	res.Ok = true
+	kv.stats.puts++
 	return nil
 }
 
-func (kv *KVService) Abort(request *kvs.CommitRequest, response *kvs.AbortResponse) error {
+func (kv *KVService) Commit(req *kvs.CommitRequest, res *kvs.CommitResponse) error {
 	kv.Lock()
 	defer kv.Unlock()
-	if request.Lead {
-		kv.stats.aborts++
+
+	tx, ok := kv.transactions[req.TxID]
+	if !ok || tx.Status != Pending {
+		res.Ok = false
+		return nil
 	}
 
-	transactionId := request.TransactionId
-	transaction := kv.transactions[transactionId]
-	for _, op := range transaction.ops {
-		v := kv.mp[op.Key]
-		if op.IsRead {
-			//skip
-		} else {
-			v.writer = nil
+	// Apply all writes
+	for k, v := range tx.WriteSet {
+		entry := kv.data[k]
+		entry.Value = v
+	}
+
+	// Release all locks
+	for k := range tx.ReadSet {
+		entry := kv.data[k]
+		delete(entry.Readers, req.TxID)
+	}
+	for k := range tx.WriteSet {
+		entry := kv.data[k]
+		if entry.Writer == req.TxID {
+			entry.Writer = ""
 		}
-		delete(v.readers, transactionId)
-		kv.mp[op.Key] = v
 	}
-	response.Ack = true
-	delete(kv.transactions, transactionId)
-	//free locks
 
+	tx.Status = Committed
+	if req.Lead {
+		kv.commits++
+	}
+	res.Ok = true
 	return nil
 }
+
+func (kv *KVService) Abort(req *kvs.CommitRequest, res *kvs.CommitResponse) error {
+	kv.Lock()
+	defer kv.Unlock()
+
+	tx, ok := kv.transactions[req.TxID]
+	if !ok || tx.Status != Pending {
+		res.Ok = false
+		return nil
+	}
+
+	// Just release all locks
+	for k := range tx.ReadSet {
+		entry := kv.data[k]
+		delete(entry.Readers, req.TxID)
+	}
+	for k := range tx.WriteSet {
+		entry := kv.data[k]
+		if entry.Writer == req.TxID {
+			entry.Writer = ""
+		}
+	}
+
+	tx.Status = Aborted
+	if req.Lead {
+		kv.aborts++
+	}
+	res.Ok = true
+	return nil
+}
+
 
 func (kv *KVService) GetAccountBalance(request *kvs.GetSumRequest, response *kvs.GetSumResponse) error {
 	kv.Lock()
@@ -194,22 +266,27 @@ func (kv *KVService) GetAccountBalance(request *kvs.GetSumRequest, response *kvs
 
 func (kv *KVService) printStats() {
 	kv.Lock()
-	commits := kv.stats
-	prevCommits := kv.prevStats
-	kv.prevStats = commits
+	stats := kv.stats
+	prevStats := kv.prevStats
+	commits := kv.commits
+	aborts := kv.aborts
+	kv.prevStats = stats
 	now := time.Now()
 	lastPrint := kv.lastPrint
 	kv.lastPrint = now
 	kv.Unlock()
 
-	diff := commits.Sub(&prevCommits)
+	diff := stats.Sub(&prevStats)
 	deltaS := now.Sub(lastPrint).Seconds()
 
-	fmt.Printf("aborts/s %0.2f\ncommits/s %0.2f\nops/s %0.2f\n\n",
-		float64(diff.aborts)/deltaS,
+	fmt.Printf("commits/s %.2f\naborts/s %.2f\nops/s %.2f\ncommit/s %.2f\nabort/s %.2f\n\n",
 		float64(diff.commits)/deltaS,
-		float64(diff.aborts+diff.commits)/deltaS)
+		float64(diff.aborts)/deltaS,
+		float64(diff.commits+diff.aborts)/deltaS,
+		float64(commits)/deltaS,
+		float64(aborts)/deltaS)
 }
+
 
 func main() {
 	port := flag.String("port", "8080", "Port to run the server on")

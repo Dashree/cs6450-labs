@@ -45,6 +45,7 @@ func toInteger(str string) int {
 }
 
 type Client struct {
+	id        int
 	rpcClient *rpc.Client
 }
 
@@ -52,14 +53,105 @@ type Clients struct {
 	Clients []*Client
 }
 
-func Dial(addr string) *Client {
+func Dial(int clientID, addr string) *Client {
 	rpcClient, err := rpc.DialHTTP("tcp", addr)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	return &Client{rpcClient}
+	return &Client{id: clientID, rpcClient: rpcClient}
 }
+
+func (c *Client) Begin() {
+	// Generate a unique TxID per transaction
+	c.txID = fmt.Sprintf("%d-%d", c.id, rand.Int63())
+}
+
+func (c *Client) TxnGet(key string) (string, bool) {
+	request := kvs.TxnRequest{
+		TxID: c.txID,
+		Key:  key,
+	}
+	response := kvs.TxnResponse{}
+	err := c.rpcClient.Call("KVService.Get", &request, &response)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return response.Value, response.Ok
+}
+
+func (c *Client) TxnPut(key, value string) bool {
+	request := kvs.TxnRequest{
+		TxID:  c.txID,
+		Key:   key,
+		Value: value,
+	}
+	response := kvs.TxnResponse{}
+	err := c.rpcClient.Call("KVService.Put", &request, &response)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return response.Ok
+}
+
+func (c *Client) Commit(lead bool) bool {
+	req := kvs.CommitRequest{
+		TxID: c.txID,
+		Lead: lead,
+	}
+	res := kvs.CommitResponse{}
+	err := c.rpcClient.Call("KVService.Commit", &req, &res)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return res.Ok
+}
+
+func (c *Client) Abort(lead bool) {
+	req := kvs.CommitRequest{
+		TxID: c.txID,
+		Lead: lead,
+	}
+	res := kvs.CommitResponse{}
+	err := c.rpcClient.Call("KVService.Abort", &req, &res)
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+func (c *Client) RunTransaction(ops []kvs.Operation, value string) {
+	for {
+		c.Begin()
+
+		allOk := true
+		for _, op := range ops {
+			key := fmt.Sprintf("%d", op.Key)
+			if op.IsRead {
+				_, ok := c.TxnGet(key)
+				if !ok {
+					allOk = false
+					break
+				}
+			} else {
+				ok := c.TxnPut(key, value)
+				if !ok {
+					allOk = false
+					break
+				}
+			}
+		}
+
+		if allOk {
+			if c.Commit(true) {
+				return // success
+			}
+		}
+
+		// Transaction failed — must abort and retry
+		c.Abort(true)
+	}
+}
+
 
 func (client *Client) Get(key string, clientId int, transactionId uuid.UUID) kvs.GetResponse {
 	request := kvs.GetRequest{
@@ -92,123 +184,75 @@ func (client *Client) Put(key string, value string, clientId int, transactionId 
 	return response
 }
 
-func (clients *Clients) Begin(clientId int, src int, dst int, amountToTransfer int) {
-	//creates and enters a transaction.
-	transactionId := uuid.New()
-	fmt.Printf("Begin for %d \n", transactionId.ID())
+func runClient(id int, addr string, done *atomic.Bool, workload *kvs.Workload, resultsCh chan<- uint64) {
+	client := Dial(id, addr)
 
+	value := strings.Repeat("x", 128)
+	opsCompleted := uint64(0)
+
+	for !done.Load() {
+		// Generate 3-op transaction
+		var ops []kvs.Operation
+		for i := 0; i < 3; i++ {
+			op := workload.Next()
+			ops = append(ops, op)
+		}
+
+		client.RunTransaction(ops, value)
+		opsCompleted += 3
+	}
+
+	fmt.Printf("Client %d finished operations.\n", id)
+	resultsCh <- opsCompleted
+}
+
+func (c *Client) RunXferTransaction() {
 	for {
-		serverList := []int{} //keeps track of index into clients.clients
-		srcindex := getHostForKey(toString(src), len(clients.Clients))
-		dstindex := getHostForKey(toString(dst), len(clients.Clients))
-		serverList = append(serverList, srcindex)
-		if !slices.Contains(serverList, dstindex) {
-			serverList = append(serverList, dstindex)
-		}
-		var srcresponse kvs.GetResponse
-		var dstresponse kvs.GetResponse
-		srcresponse = clients.Clients[srcindex].Get(toString(src), clientId, transactionId)
+		c.Begin()
 
-		if !srcresponse.Ack {
-			fmt.Printf("aborting on get \n")
-			clients.Abort(transactionId, serverList)
-			// time.Sleep(5 * time.Second)
-			if !continueAborting {
-				return
-			}
-			continue
+		// Each client transfers $100 from their account (src) to the next (dst)
+		src := c.id
+		dst := (c.id + 1) % 10
 
-		}
-		srcputresponse := clients.Clients[srcindex].Put(toString(src), toString(toInteger(srcresponse.Value)+amountToTransfer), clientId, transactionId)
-		if !srcputresponse.Ack {
-			fmt.Printf("aborting on put src\n")
-
-			clients.Abort(transactionId, serverList)
-			// time.Sleep(5 * time.Second)
-
-			if continueAborting {
-				continue
-			} else {
-				return
-			}
-		}
-
-		dstresponse = clients.Clients[dstindex].Get(toString(dst), clientId, transactionId)
-		if (!dstresponse.Ack) || toInteger(dstresponse.Value) < amountToTransfer {
-			fmt.Printf("aborting on get dst \n")
-			clients.Abort(transactionId, serverList)
-			// time.Sleep(5 * time.Second)
-
-			if !continueAborting {
-				return
-			}
+		// 1. Get the balance for src
+		srcBal, ok := c.TxnGet(fmt.Sprintf("%d", src))
+		if !ok || srcBal < 100 {
+			c.Abort(true)
 			continue
 		}
 
-		dstputresponse := clients.Clients[dstindex].Put(toString(dst), toString(toInteger(dstresponse.Value)-amountToTransfer), clientId, transactionId)
-		if !dstputresponse.Ack {
-			fmt.Printf("aborting on put dst\n")
-
-			clients.Abort(transactionId, serverList)
-			// time.Sleep(5 * time.Second)
-
-			if continueAborting {
-				continue
-			} else {
-				return
-			}
+		// 2. Get the balance for dst
+		dstBal, ok := c.TxnGet(fmt.Sprintf("%d", dst))
+		if !ok {
+			c.Abort(true)
+			continue
 		}
-		fmt.Printf("Commiting \n")
-		clients.Commit(transactionId, serverList)
-		return
+
+		// 3. Perform the transfer
+		c.TxnPut(fmt.Sprintf("%d", src), fmt.Sprintf("%d", srcBal-100)) // Decrease src balance
+		c.TxnPut(fmt.Sprintf("%d", dst), fmt.Sprintf("%d", dstBal+100)) // Increase dst balance
+
+		// 4. Commit the transaction
+		if c.Commit(true) {
+			return // transaction success
+		}
+
+		// If transaction fails, abort and retry
+		c.Abort(true)
 	}
 }
 
-func (clients *Clients) Commit(transactionId uuid.UUID, serverList []int) {
-	//Contact all servers involved in transaction
-	//server should do all puts that are pending
-	//server should drop all locks
-	for i, serverIdx := range serverList {
-		lead := false
-		if i == 0 {
-			lead = true
-		}
-		request := kvs.CommitRequest{
-			TransactionId: transactionId.ID(),
-			Lead:          lead,
-		}
-		response := kvs.CommitResponse{}
-		err := clients.Clients[serverIdx].rpcClient.Call("KVService.Commit", &request, &response)
-		if err != nil {
-			log.Fatal(err)
-		}
+func runXferClient(id int, addr string, done *atomic.Bool, resultsCh chan<- uint64) {
+	client := Dial(id, addr)
+
+	// Run transfers for a specific duration or until aborted
+	for !done.Load() {
+		client.RunXferTransaction()
 	}
-	// time.Sleep(1 * time.Second)
+
+	resultsCh <- 1 // One successful transfer per iteration
 }
 
-func (clients *Clients) Abort(transactionId uuid.UUID, serverList []int) {
-	//calling abort is illegal unless a transaction has been entered
-	//Contact all servers involved in transaction
-	//server should discard all puts that are pending
-	//server should drop all locks
-	for i, serverIdx := range serverList {
-		lead := false
-		if i == 0 {
-			lead = true
-		}
-		request := kvs.AbortRequest{
-			TransactionId: transactionId.ID(),
-			Lead:          lead,
-		}
-		response := kvs.AbortResponse{}
-		err := clients.Clients[serverIdx].rpcClient.Call("KVService.Abort", &request, &response)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-	}
-	// time.Sleep(1 * time.Second)
-}
 
 func getTotal(addrs []string) {
 	clients := Clients{Clients: []*Client{}}
@@ -240,30 +284,6 @@ func (client *Client) getSum(key string) int {
 	return ret
 }
 
-func runClient(clientId int, addrs []string, done *atomic.Bool) {
-	clients := Clients{Clients: []*Client{}}
-	for _, addr := range addrs {
-		client := Dial(addr)
-		clients.Clients = append(clients.Clients, client)
-	}
-
-	const batchSize = 1024
-
-	for !done.Load() {
-		for j := 0; j < batchSize; j++ {
-			src := rand.Intn(numberOfAccountsperClient)
-			dst := rand.Intn(numberOfAccountsperClient)
-			if src == dst {
-				dst = (dst + 1) % numberOfAccountsperClient
-			}
-			amountToTransfer := rand.Intn(20)
-
-			//Begin Transaction
-			clients.Begin(clientId, src, dst, amountToTransfer)
-		}
-	}
-}
-
 type HostList []string
 
 func (h *HostList) String() string {
@@ -282,7 +302,7 @@ func main() {
 	theta := flag.Float64("theta", 0.99, "Zipfian distribution skew parameter")
 	workload := flag.String("workload", "YCSB-B", "Workload type (YCSB-A, YCSB-B, YCSB-C)")
 	secs := flag.Int("secs", 8, "Duration in seconds for each client to run")
-	clientID := flag.Int("clientid", -1, "Relative client ID starting at 0")
+	clientID := rand.Int63()
 	reqBatchsize = uint32(*flag.Uint64("batch-size", 8, "Batch for Get Requests"))
 	workloadsPerHost = uint32(*flag.Uint64("thrds-per-host", 8, "Number of go routines per hosts"))
 	numberOfAccountsperClient = *flag.Int("accounts-per-client", 10, "Number of accounts each client manages")
@@ -301,23 +321,63 @@ func main() {
 		hosts, *theta, *workload, *secs,
 	)
 
-	//start := time.Now()
-	continueAborting = true
+	start := time.Now()
 	done := atomic.Bool{}
+	resultsCh := make(chan uint64)
 
-	for j := 0; j < numberOfAccountsperClient; j++ {
-		go func(clientId int) {
-			// workload := kvs.NewWorkload(*workload, *theta)
-			runClient(clientId, hosts, &done)
-		}(*clientID)
+
+	if isBank {
+				// Run multiple clients for xfer workload
+	for clientId := 0; clientId < 10; clientId++ {
+		go runXferClient(clientId, host, &done, resultsCh)
 	}
+		} else {
+		go func(clientId int) {
+		workload := kvs.NewWorkload(*workload, *theta)
+		runClient(clientId, host, &done, workload, resultsCh)
+	}(clientId)
 
+		}
+
+
+	// Run for the specified time
 	time.Sleep(time.Duration(*secs) * time.Second)
 	done.Store(true)
-	continueAborting = false
 
-	time.Sleep(3 * time.Second) // wait one second
-	getTotal(hosts)
-	time.Sleep(1 * time.Second) // wait one second
+
+	elapsed := time.Since(start)
+	opsPerSec := float64(opsCompleted) / elapsed.Seconds()
+	fmt.Printf("Total throughput: %.2f ops/s\n", opsPerSec)
+
+	
+	if isBank {
+		// Collect results
+		opsCompleted := uint64(0)
+		for i := 0; i < 10; i++ {
+			opsCompleted += <-resultsCh
+		}
+		
+		// Perform final balance check
+		totalBalance := int64(0)
+		for i := 0; i < 10; i++ {
+			balance, _ := strconv.Atoi(client.Get(fmt.Sprintf("%d", i)))
+			totalBalance += int64(balance)
+		}
+
+		// Assert total balance is correct (should be $10000)
+		if totalBalance == 10000 {
+			fmt.Println("Total balance check passed.")
+		} else {
+			fmt.Println("Total balance check failed.")
+		}
+
+	} else {
+		opsCompleted := <-resultsCh
+
+		elapsed := time.Since(start)
+
+		opsPerSec := float64(opsCompleted) / elapsed.Seconds()
+		fmt.Printf("throughput %.2f ops/s\n", opsPerSec)
+	}
 
 }

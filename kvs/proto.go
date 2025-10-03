@@ -22,34 +22,23 @@ type GetResponse struct {
 	Ack   bool
 }
 
-type CommitRequest struct {
-	TransactionId uint32
-	Lead          bool
-}
-
-type CommitResponse struct {
-	Ack bool
-}
-
-type AbortRequest struct {
-	TransactionId uint32
-	Lead          bool
-}
-
-type AbortResponse struct {
-	Ack bool
-}
-
-type GetSumRequest struct {
-	Key string
-}
-
-type GetSumResponse struct {
+type TxnRequest struct {
+	TxID  string
+	Key   string
 	Value string
 }
 
-type TransactionOperation struct {
-	IsRead bool
-	Key    string
-	Value  string
+type TxnResponse struct {
+	Value string
+	Ok    bool
 }
+
+type CommitRequest struct {
+	TxID string
+	Lead bool
+}
+
+type CommitResponse struct {
+	Ok bool
+}
+
