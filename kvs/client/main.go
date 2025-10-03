@@ -64,9 +64,9 @@ func Dial(addr string) *Client {
 
 func (client *Client) Get(key string, clientId int, transactionId uuid.UUID) kvs.GetResponse {
 	request := kvs.GetRequest{
-		Key:          key,
+		Key:           key,
 		TransactionId: int(transactionId.ID()),
-		ClientId:     clientId,
+		ClientId:      clientId,
 	}
 	response := kvs.GetResponse{}
 	err := client.rpcClient.Call("KVService.Get", &request, &response)
@@ -79,10 +79,10 @@ func (client *Client) Get(key string, clientId int, transactionId uuid.UUID) kvs
 
 func (client *Client) Put(key string, value string, clientId int, transactionId uuid.UUID) kvs.PutResponse {
 	request := kvs.PutRequest{
-		Key:          key,
-		Value:        value,
+		Key:           key,
+		Value:         value,
 		TransactionId: transactionId.ID(),
-		ClientId:     clientId,
+		ClientId:      clientId,
 	}
 	response := kvs.PutResponse{}
 	err := client.rpcClient.Call("KVService.Put", &request, &response)
@@ -108,25 +108,25 @@ func (clients *Clients) Begin(clientId int, transaction []kvs.TransactionOperati
 				response := clients.Clients[serverIdx].Get(op.Key, clientId, transactionId)
 				if !response.Ack {
 					// fmt.Printf("aborting on get \n")
-					clients.Abort(transactionId, serverList)
+					clients.Abort(clientId, transactionId, serverList)
 					if !continueAborting {
 						return
 					}
 					continue
 				}
-				clients.Commit(transactionId, serverList)
+				clients.Commit(clientId, transactionId, serverList)
 				return
 			} else {
 				response := clients.Clients[serverIdx].Put(op.Key, op.Value, clientId, transactionId)
 				if !response.Ack {
 					// fmt.Printf("aborting on put\n")
-					clients.Abort(transactionId, serverList)
+					clients.Abort(clientId, transactionId, serverList)
 					if !continueAborting {
 						return
 					}
 					continue
 				}
-				clients.Commit(transactionId, serverList)
+				clients.Commit(clientId, transactionId, serverList)
 				return
 			}
 		}
@@ -136,7 +136,7 @@ func (clients *Clients) Begin(clientId int, transaction []kvs.TransactionOperati
 func (clients *Clients) BeginBank(clientId int, src int, dst int, amountToTransfer int) {
 	//creates and enters a transaction.
 	transactionId := uuid.New()
-	fmt.Printf("Begin for %d \n", transactionId.ID())
+	// fmt.Printf("Begin for %d \n", transactionId.ID())
 
 	for {
 		serverList := []int{} //keeps track of index into clients.clients
@@ -149,8 +149,8 @@ func (clients *Clients) BeginBank(clientId int, src int, dst int, amountToTransf
 		srcresponse := clients.Clients[srcindex].Get(toString(src), clientId, transactionId)
 
 		if !srcresponse.Ack {
-			fmt.Printf("aborting on get \n")
-			clients.Abort(transactionId, serverList)
+			// fmt.Printf("aborting on get \n")
+			clients.Abort(clientId, transactionId, serverList)
 
 			if !continueAborting {
 				return
@@ -160,8 +160,8 @@ func (clients *Clients) BeginBank(clientId int, src int, dst int, amountToTransf
 		}
 		srcputresponse := clients.Clients[srcindex].Put(toString(src), toString(toInteger(srcresponse.Value)+amountToTransfer), clientId, transactionId)
 		if !srcputresponse.Ack {
-			fmt.Printf("aborting on put src\n")
-			clients.Abort(transactionId, serverList)
+			// fmt.Printf("aborting on put src\n")
+			clients.Abort(clientId, transactionId, serverList)
 
 			if continueAborting {
 				continue
@@ -172,8 +172,8 @@ func (clients *Clients) BeginBank(clientId int, src int, dst int, amountToTransf
 
 		dstresponse := clients.Clients[dstindex].Get(toString(dst), clientId, transactionId)
 		if (!dstresponse.Ack) || toInteger(dstresponse.Value) < amountToTransfer {
-			fmt.Printf("aborting on get dst \n")
-			clients.Abort(transactionId, serverList)
+			// fmt.Printf("aborting on get dst \n")
+			clients.Abort(clientId, transactionId, serverList)
 
 			if !continueAborting {
 				return
@@ -183,8 +183,8 @@ func (clients *Clients) BeginBank(clientId int, src int, dst int, amountToTransf
 
 		dstputresponse := clients.Clients[dstindex].Put(toString(dst), toString(toInteger(dstresponse.Value)-amountToTransfer), clientId, transactionId)
 		if !dstputresponse.Ack {
-			fmt.Printf("aborting on put dst\n")
-			clients.Abort(transactionId, serverList)
+			// fmt.Printf("aborting on put dst\n")
+			clients.Abort(clientId, transactionId, serverList)
 
 			if continueAborting {
 				continue
@@ -192,13 +192,13 @@ func (clients *Clients) BeginBank(clientId int, src int, dst int, amountToTransf
 				return
 			}
 		}
-		fmt.Printf("Commiting \n")
-		clients.Commit(transactionId, serverList)
+		// fmt.Printf("Commiting \n")
+		clients.Commit(clientId, transactionId, serverList)
 		return
 	}
 }
 
-func (clients *Clients) Commit(transactionId uuid.UUID, serverList []int) {
+func (clients *Clients) Commit(ClientId int, transactionId uuid.UUID, serverList []int) {
 	//Contact all servers involved in transaction
 	//server should do all puts that are pending
 	//server should drop all locks
@@ -220,7 +220,7 @@ func (clients *Clients) Commit(transactionId uuid.UUID, serverList []int) {
 	// time.Sleep(1 * time.Second)
 }
 
-func (clients *Clients) Abort(transactionId uuid.UUID, serverList []int) {
+func (clients *Clients) Abort(clientID int, transactionId uuid.UUID, serverList []int) {
 	//calling abort is illegal unless a transaction has been entered
 	//Contact all servers involved in transaction
 	//server should discard all puts that are pending
@@ -274,7 +274,7 @@ func (client *Client) getSum(key string) int {
 	return ret
 }
 
-func runClientBank(clientId int, addrs []string, done *atomic.Bool) {
+func runClientBank(clientId int, addrs []string, done *atomic.Bool, totalOps *atomic.Uint64) {
 	clients := Clients{Clients: []*Client{}}
 	for _, addr := range addrs {
 		client := Dial(addr)
@@ -292,13 +292,14 @@ func runClientBank(clientId int, addrs []string, done *atomic.Bool) {
 			}
 			amountToTransfer := rand.Intn(20)
 
-			//Begin Transaction
+			// Begin Transaction
 			clients.BeginBank(clientId, src, dst, amountToTransfer)
+			totalOps.Add(4)
 		}
 	}
 }
 
-func runClient(clientId int, addrs []string, workload *kvs.Workload, done *atomic.Bool) {
+func runClient(clientId int, addrs []string, workload *kvs.Workload, done *atomic.Bool, totalOps *atomic.Uint64) {
 	clients := Clients{Clients: []*Client{}}
 	for _, addr := range addrs {
 		client := Dial(addr)
@@ -315,9 +316,9 @@ func runClient(clientId int, addrs []string, workload *kvs.Workload, done *atomi
 			} else {
 				transaction = append(transaction, kvs.TransactionOperation{IsRead: false, Key: key, Value: value})
 			}
-
 		}
 		clients.Begin(clientId, transaction)
+		totalOps.Add(3)
 	}
 }
 
@@ -338,7 +339,7 @@ func main() {
 	flag.Var(&hosts, "hosts", "Comma-separated list of host:ports to connect to")
 	theta := flag.Float64("theta", 0.99, "Zipfian distribution skew parameter")
 	workload := flag.String("workload", "YCSB-B", "Workload type (YCSB-A, YCSB-B, YCSB-C)")
-	secs := flag.Int("secs", 30, "Duration in seconds for each client to run")
+	secs := flag.Int("secs", 20, "Duration in seconds for each client to run")
 	clientID := flag.Int("clientid", -1, "Relative client ID starting at 0")
 	reqBatchsize = uint32(*flag.Uint64("batch-size", 8, "Batch for Get Requests"))
 	workloadsPerHost = uint32(*flag.Uint64("thrds-per-host", 8, "Number of go routines per hosts"))
@@ -360,35 +361,37 @@ func main() {
 	)
 	// hosts = append(hosts[:1], hosts[1+1:]...)
 
-	//start := time.Now()
+	start := time.Now()
 	continueAborting = true
 	done := atomic.Bool{}
+	var totalOps atomic.Uint64
 
 	if workloadType != nil && *workloadType == 0 {
 		for j := 0; j < numberOfAccountsperClient; j++ {
 			go func(clientId int) {
-				// workload := kvs.NewWorkload(*workload, *theta)
-				runClientBank(clientId, hosts, &done)
+				runClientBank(clientId, hosts, &done, &totalOps)
 			}(*clientID)
 		}
 	} else {
 		var numberOfClientsPerHost = runtime.NumCPU() * int(workloadsPerHost)
+
 		for j := 0; j < numberOfClientsPerHost; j++ {
 			go func(clientId int) {
-				// workload := kvs.NewWorkload(*workload, *theta)
-				runClient(clientId, hosts, kvs.NewWorkload(*workload, *theta), &done)
+				runClient(clientId, hosts, kvs.NewWorkload(*workload, *theta), &done, &totalOps)
 			}(*clientID)
 		}
 	}
 
 	time.Sleep(time.Duration(*secs) * time.Second)
 	done.Store(true)
-	continueAborting = false
 
-	time.Sleep(3 * time.Second) // wait one second
+	elapsed := time.Since(start)
+	opsPerSec := float64(totalOps.Load()) / elapsed.Seconds()
+
+	fmt.Printf("throughput %.2f ops/s\n", opsPerSec)
+
 	if *workloadType == 0 {
+		time.Sleep(3 * time.Second)
 		getTotal(hosts)
 	}
-	time.Sleep(1 * time.Second) // wait one second
-
 }

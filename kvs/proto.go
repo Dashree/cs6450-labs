@@ -1,10 +1,10 @@
 package kvs
 
 type PutRequest struct {
-	Key          string
-	Value        string
+	Key           string
+	Value         string
 	TransactionId uint32
-	ClientId     int
+	ClientId      int
 }
 
 type PutResponse struct {
@@ -12,9 +12,9 @@ type PutResponse struct {
 }
 
 type GetRequest struct {
-	Key          string
+	Key           string
 	TransactionId int
-	ClientId     int
+	ClientId      int
 }
 
 type GetResponse struct {
@@ -23,6 +23,7 @@ type GetResponse struct {
 }
 
 type CommitRequest struct {
+	ClientId      int
 	TransactionId uint32
 	Lead          bool
 }
@@ -32,6 +33,7 @@ type CommitResponse struct {
 }
 
 type AbortRequest struct {
+	ClientId      int
 	TransactionId uint32
 	Lead          bool
 }
