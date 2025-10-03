@@ -100,6 +100,7 @@ func (kv *KVService) Get(request *kvs.GetRequest, response *kvs.GetResponse) err
 	} else {
 		//get read lock
 		value.readers[transaction.id] = transaction
+		kv.mp[request.Key] = value
 		response.Ack = true
 		response.Value = value.value
 	}
@@ -228,7 +229,7 @@ func main() {
 	// numShards = *flag.Uint64("num-shards", 1, "Number of Shards in the KVStore")
 	//mapAllocCount := *flag.Uint64("alloc", 400_000, "Number expected for keys per shard")
 	// enableCache = *flag.Bool("cache", false, "Use cached values for string storage")
-	workloadType = uint32(*flag.Uint64("workload-type", 1, "0 for Bank account, 1 for standard"))
+	workloadType = uint32(*flag.Uint64("workload-type", 0, "0 for Bank account, 1 for standard"))
 	flag.Parse()
 	// Convert workloadType to uint32 if needed
 	// var workloadTypeUint32 uint32 = uint32(*workloadType)

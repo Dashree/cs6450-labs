@@ -21,7 +21,6 @@ import (
 var reqBatchsize uint32
 var workloadsPerHost uint32
 var numberOfAccountsperClient int
-var continueAborting bool
 
 func getHostForKey(key string, numHosts int) int {
 	if numHosts <= 0 {
@@ -109,26 +108,20 @@ func (clients *Clients) Begin(clientId int, transaction []kvs.TransactionOperati
 				if !response.Ack {
 					// fmt.Printf("aborting on get \n")
 					clients.Abort(clientId, transactionId, serverList)
-					if !continueAborting {
-						return
-					}
 					continue
 				}
-				clients.Commit(clientId, transactionId, serverList)
-				return
+
 			} else {
 				response := clients.Clients[serverIdx].Put(op.Key, op.Value, clientId, transactionId)
 				if !response.Ack {
 					// fmt.Printf("aborting on put\n")
 					clients.Abort(clientId, transactionId, serverList)
-					if !continueAborting {
-						return
-					}
+			
 					continue
 				}
-				clients.Commit(clientId, transactionId, serverList)
-				return
 			}
+			clients.Commit(clientId, transactionId, serverList)
+			return
 		}
 	}
 }
@@ -152,9 +145,6 @@ func (clients *Clients) BeginBank(clientId int, src int, dst int, amountToTransf
 			// fmt.Printf("aborting on get \n")
 			clients.Abort(clientId, transactionId, serverList)
 
-			if !continueAborting {
-				return
-			}
 			continue
 
 		}
@@ -163,11 +153,7 @@ func (clients *Clients) BeginBank(clientId int, src int, dst int, amountToTransf
 			// fmt.Printf("aborting on put src\n")
 			clients.Abort(clientId, transactionId, serverList)
 
-			if continueAborting {
-				continue
-			} else {
-				return
-			}
+			return
 		}
 
 		dstresponse := clients.Clients[dstindex].Get(toString(dst), clientId, transactionId)
@@ -175,9 +161,6 @@ func (clients *Clients) BeginBank(clientId int, src int, dst int, amountToTransf
 			// fmt.Printf("aborting on get dst \n")
 			clients.Abort(clientId, transactionId, serverList)
 
-			if !continueAborting {
-				return
-			}
 			continue
 		}
 
@@ -186,11 +169,7 @@ func (clients *Clients) BeginBank(clientId int, src int, dst int, amountToTransf
 			// fmt.Printf("aborting on put dst\n")
 			clients.Abort(clientId, transactionId, serverList)
 
-			if continueAborting {
-				continue
-			} else {
-				return
-			}
+			return
 		}
 		// fmt.Printf("Commiting \n")
 		clients.Commit(clientId, transactionId, serverList)
@@ -339,12 +318,12 @@ func main() {
 	flag.Var(&hosts, "hosts", "Comma-separated list of host:ports to connect to")
 	theta := flag.Float64("theta", 0.99, "Zipfian distribution skew parameter")
 	workload := flag.String("workload", "YCSB-B", "Workload type (YCSB-A, YCSB-B, YCSB-C)")
-	secs := flag.Int("secs", 20, "Duration in seconds for each client to run")
+	secs := flag.Int("secs", 15, "Duration in seconds for each client to run")
 	clientID := flag.Int("clientid", -1, "Relative client ID starting at 0")
 	reqBatchsize = uint32(*flag.Uint64("batch-size", 8, "Batch for Get Requests"))
 	workloadsPerHost = uint32(*flag.Uint64("thrds-per-host", 8, "Number of go routines per hosts"))
 	numberOfAccountsperClient = *flag.Int("accounts-per-client", 10, "Number of accounts each client manages")
-	workloadType := flag.Int("workload-type", 1, "0 for Bank account, 1 for standard")
+	workloadType := flag.Int("workload-type", 0, "0 for Bank account, 1 for standard")
 
 	flag.Parse()
 
@@ -362,7 +341,6 @@ func main() {
 	// hosts = append(hosts[:1], hosts[1+1:]...)
 
 	start := time.Now()
-	continueAborting = true
 	done := atomic.Bool{}
 	var totalOps atomic.Uint64
 
@@ -391,7 +369,7 @@ func main() {
 	fmt.Printf("throughput %.2f ops/s\n", opsPerSec)
 
 	if *workloadType == 0 {
-		time.Sleep(3 * time.Second)
+		time.Sleep(4 * time.Second)
 		getTotal(hosts)
 	}
 }
