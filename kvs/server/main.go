@@ -141,7 +141,11 @@ func (kv *KVService) Commit(request *kvs.CommitRequest, response *kvs.CommitResp
 	}
 
 	transactionId := request.TransactionId
-	transaction := kv.transactions[transactionId]
+	transaction, ok := kv.transactions[transactionId]
+	if !ok || transaction == nil {
+		response.Ack = true
+		return nil
+	}
 	for _, op := range transaction.ops {
 		v := kv.mp[op.Key]
 		if op.IsRead {
@@ -168,8 +172,12 @@ func (kv *KVService) Abort(request *kvs.AbortRequest, response *kvs.AbortRespons
 	}
 
 	transactionId := request.TransactionId
-	transaction := kv.transactions[transactionId]
-	for _, op := range transaction.ops {
+	transaction, ok := kv.transactions[transactionId]
+		if !ok || transaction == nil {
+			response.Ack = true
+			return nil
+		}
+		for _, op := range transaction.ops {
 		v := kv.mp[op.Key]
 		if op.IsRead {
 			//skip
