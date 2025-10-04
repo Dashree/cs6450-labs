@@ -3,7 +3,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"hash/maphash"
 	"log"
 	"math/rand"
 	"net/rpc"
@@ -13,6 +12,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"hash/fnv"
+
 
 	"github.com/google/uuid"
 	"github.com/rstutsman/cs6450-labs/kvs"
@@ -23,12 +24,9 @@ var workloadsPerHost uint32
 var numberOfAccountsperClient int
 
 func getHostForKey(key string, numHosts int) int {
-	if numHosts <= 0 {
-		panic("n must be > 0")
-	}
-	var h maphash.Hash
-	h.WriteString(key)
-	return int(h.Sum64() % uint64(numHosts))
+    h := fnv.New64a()
+    h.Write([]byte(key))
+    return int(h.Sum64() % uint64(numHosts))
 }
 
 func toString(integer int) string {
