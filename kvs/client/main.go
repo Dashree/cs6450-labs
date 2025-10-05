@@ -1,9 +1,8 @@
 package main
 
 import (
-	"flag"
 	"fmt"
-	"hash/maphash"
+	"hash/fnv"
 	"log"
 	"math/rand"
 	"net/rpc"
@@ -12,285 +11,214 @@ import (
 	"sync/atomic"
 	"time"
 
-	// "github.com/google/uuid"
 	"github.com/rstutsman/cs6450-labs/kvs"
 )
 
 var workloadsPerHost uint32
 var numberOfAccountsperClient int
 
+type Txn struct {
+	ID         string
+	ShardTxIDs map[int]string
+	WriteSet   map[string]string
+}
 
 type Client struct {
-	id        int
-	txID      string
-	rpcClient *rpc.Client
+	ID         int
+	RPCClients map[int]*rpc.Client
+	NumShards  int
 }
 
-// NewClient creates a new client instance and connects to the server at addr.
-func NewClient(id int, addr string) *Client {
-	rpcClient, err := rpc.Dial("tcp", addr)
-	if err != nil {
-		log.Fatal("Dialing:", err)
-	}
-	return &Client{id: id, rpcClient: rpcClient}
+// ------------------- Sharding -------------------
+func ShardForKey(key string, numShards int) int {
+	h := fnv.New64a()
+	h.Write([]byte(key))
+	return int(h.Sum64() % uint64(numShards))
 }
 
-func Dial(clientID int, addr string) *Client {
-	rpcClient, err := rpc.DialHTTP("tcp", addr)
-	if err != nil {
-		log.Fatal(err)
+// ------------------- Client -------------------
+func NewClient(id int, addrs []string) *Client {
+	clients := make(map[int]*rpc.Client)
+	for i, addr := range addrs {
+		c, err := rpc.Dial("tcp", addr)
+		if err != nil {
+			log.Fatal(err)
+		}
+		clients[i] = c
 	}
-	return &Client{id: clientID, rpcClient: rpcClient}
+	return &Client{ID: id, RPCClients: clients, NumShards: len(addrs)}
 }
 
-// Begin starts a new transaction by generating a fresh TxID.
-func (c *Client) Begin() {
-	rand.Seed(time.Now().UnixNano())
-	c.txID = fmt.Sprintf("%d-%d", c.id, rand.Int())
+func (c *Client) Begin() *Txn {
+	return &Txn{
+		ID:         fmt.Sprintf("%d-%d", c.ID, time.Now().UnixNano()),
+		ShardTxIDs: make(map[int]string),
+		WriteSet:   make(map[string]string),
+	}
 }
 
-// TxnGet performs a transactional Get.
-func (c *Client) TxnGet(key string) (int, bool) {
-	request := kvs.TxnRequest{
-		ClientID: fmt.Sprintf("%d", c.id),
-		TxID:     c.txID,
-		Key:      key,
-	}
-	response := kvs.TxnResponse{}
-	err := c.rpcClient.Call("KVService.TxnGet", &request, &response)
-	if err != nil {
-		log.Fatal(err)
-	}
-	val, _ := strconv.Atoi(response.Value)
-	return val, response.Ok
-}
+// ------------------- TxnGet -------------------
+func (c *Client) TxnGet(tx *Txn, key string) (int, bool) {
+	shard := ShardForKey(key, c.NumShards)
+	txID := fmt.Sprintf("%s-%d", tx.ID, shard)
+	tx.ShardTxIDs[shard] = txID
 
-// TxnPut performs a transactional Put.
-func (c *Client) TxnPut(key, value string) bool {
-	request := kvs.TxnRequest{
-		ClientID: fmt.Sprintf("%d", c.id),
-		TxID:     c.txID,
-		Key:      key,
-		Value:    value,
-	}
-	response := kvs.TxnResponse{}
-	err := c.rpcClient.Call("KVService.TxnPut", &request, &response)
+	req := kvs.TxnRequest{ClientID: strconv.Itoa(c.ID), TxID: txID, Key: key}
+	var res kvs.TxnResponse
+	err := c.RPCClients[shard].Call("KVService.TxnGet", &req, &res)
 	if err != nil {
 		log.Fatal(err)
 	}
-	return response.Ok
+	val, _ := strconv.Atoi(res.Value)
+	return val, res.Ok
 }
 
-// Commit attempts to commit the current transaction.
-func (c *Client) Commit(lead bool) bool {
-	req := kvs.CommitRequest{
-		ClientID: fmt.Sprintf("%d", c.id),
-		TxID:     c.txID,
-		Lead:     lead,
-	}
-	res := kvs.CommitResponse{}
-	err := c.rpcClient.Call("KVService.Commit", &req, &res)
+// ------------------- TxnPut -------------------
+func (c *Client) TxnPut(tx *Txn, key, value string) bool {
+	shard := ShardForKey(key, c.NumShards)
+	txID := fmt.Sprintf("%s-%d", tx.ID, shard)
+	tx.ShardTxIDs[shard] = txID
+	tx.WriteSet[key] = value
+
+	req := kvs.TxnRequest{ClientID: strconv.Itoa(c.ID), TxID: txID, Key: key, Value: value}
+	var res kvs.TxnResponse
+	err := c.RPCClients[shard].Call("KVService.TxnPut", &req, &res)
 	if err != nil {
 		log.Fatal(err)
 	}
 	return res.Ok
 }
 
-// Abort aborts the current transaction.
-func (c *Client) Abort(lead bool) {
-	req := kvs.CommitRequest{
-		ClientID: fmt.Sprintf("%d", c.id),
-		TxID:     c.txID,
-		Lead:     lead,
+// ------------------- Two-phase commit -------------------
+func (c *Client) TwoPhaseCommit(tx *Txn) bool {
+	// Phase 1: Prepare
+	for shard, txID := range tx.ShardTxIDs {
+		req := kvs.CommitRequest{ClientID: strconv.Itoa(c.ID), TxID: txID, Lead: false}
+		var res kvs.CommitResponse
+		err := c.RPCClients[shard].Call("KVService.Prepare", &req, &res)
+		if err != nil || !res.Ok {
+			// Abort all
+			for s, t := range tx.ShardTxIDs {
+				ab := kvs.CommitRequest{ClientID: strconv.Itoa(c.ID), TxID: t, Lead: false}
+				var r kvs.CommitResponse
+				c.RPCClients[s].Call("KVService.Abort", &ab, &r)
+			}
+			return false
+		}
 	}
-	res := kvs.CommitResponse{}
-	err := c.rpcClient.Call("KVService.Abort", &req, &res)
-	if err != nil {
-		log.Fatal(err)
+
+	// Phase 2: Commit
+	for shard, txID := range tx.ShardTxIDs {
+		req := kvs.CommitRequest{ClientID: strconv.Itoa(c.ID), TxID: txID, Lead: false}
+		var res kvs.CommitResponse
+		err := c.RPCClients[shard].Call("KVService.Commit", &req, &res)
+		if err != nil || !res.Ok {
+			log.Fatal("Commit failed after prepare!")
+		}
 	}
+	return true
 }
 
-func (c *Client) RunTransaction(ops []kvs.WorkloadOp, value string) {
+// ------------------- RunTransaction -------------------
+func (c *Client) RunTransaction(keys []string, value string) {
 	for {
-		c.Begin()
+		tx := c.Begin()
 		allOk := true
-		for _, op := range ops {
-			key := fmt.Sprintf("%d", op.Key)
-			if op.IsRead {
-				_, ok := c.TxnGet(key)
-				if !ok {
-					allOk = false
-					break
-				}
-			} else {
-				ok := c.TxnPut(key, value)
-				if !ok {
-					allOk = false
-					break
-				}
+		for _, key := range keys {
+			if !c.TxnPut(tx, key, value) {
+				allOk = false
+				break
 			}
 		}
-		if allOk && c.Commit(true) {
+		if allOk && c.TwoPhaseCommit(tx) {
 			return
 		}
-		c.Abort(true)
 	}
 }
 
-func (c *Client) RunXferTransaction() {
+// ------------------- RunBankTransfer -------------------
+func (c *Client) RunBankTransfer(src, dst int, amount int) {
 	for {
-		c.Begin()
-		src := c.id
-		dst := (c.id + 1) % 10
+		tx := c.Begin()
+		srcKey := fmt.Sprintf("%d", src)
+		dstKey := fmt.Sprintf("%d", dst)
 
-		srcBal, ok := c.TxnGet(fmt.Sprintf("%d", src))
-		if !ok || srcBal < 100 {
-			c.Abort(true)
+		srcBal, ok := c.TxnGet(tx, srcKey)
+		if !ok || srcBal < amount {
 			continue
 		}
-		dstBal, ok := c.TxnGet(fmt.Sprintf("%d", dst))
+		dstBal, ok := c.TxnGet(tx, dstKey)
 		if !ok {
-			c.Abort(true)
 			continue
 		}
 
-		c.TxnPut(fmt.Sprintf("%d", src), fmt.Sprintf("%d", srcBal-100))
-		c.TxnPut(fmt.Sprintf("%d", dst), fmt.Sprintf("%d", dstBal+100))
+		c.TxnPut(tx, srcKey, fmt.Sprintf("%d", srcBal-amount))
+		c.TxnPut(tx, dstKey, fmt.Sprintf("%d", dstBal+amount))
 
-		if c.Commit(true) {
+		if c.TwoPhaseCommit(tx) {
 			return
 		}
-		c.Abort(true)
 	}
 }
 
-
-func runClient(id int, addr string, done *atomic.Bool, workload *kvs.Workload, resultsCh chan<- uint64) {
-	client := Dial(id, addr)
-	value := strings.Repeat("x", 128)
+// ------------------- runClient routine -------------------
+func runClient(id int, addrs []string, done *atomic.Bool, keysPerTx int, resultsCh chan<- uint64) {
+	client := NewClient(id, addrs)
+	value := strings.Repeat("x", 64)
 	opsCompleted := uint64(0)
 
 	for !done.Load() {
-		var ops []kvs.WorkloadOp
-		for i := 0; i < 3; i++ {
-			op := workload.Next()
-			ops = append(ops, op)
+		var keys []string
+		for i := 0; i < keysPerTx; i++ {
+			keys = append(keys, fmt.Sprintf("%d", rand.Intn(1000)))
 		}
-		client.RunTransaction(ops, value)
-		opsCompleted += 3
+		client.RunTransaction(keys, value)
+		opsCompleted += uint64(keysPerTx)
 	}
 	resultsCh <- opsCompleted
 }
 
-func runXferClient(id int, addr string, done *atomic.Bool, resultsCh chan<- uint64) {
-	client := Dial(id, addr)
+// ------------------- runBankClient routine -------------------
+func runBankClient(id int, addrs []string, done *atomic.Bool, resultsCh chan<- uint64) {
+	client := NewClient(id, addrs)
 	count := uint64(0)
 	for !done.Load() {
-		client.RunXferTransaction()
+		src := rand.Intn(numberOfAccountsperClient)
+		dst := rand.Intn(numberOfAccountsperClient)
+		if src == dst {
+			dst = (dst + 1) % numberOfAccountsperClient
+		}
+		client.RunBankTransfer(src, dst, 100)
 		count++
 	}
 	resultsCh <- count
 }
 
-func getHostForKey(key string, numHosts int) int {
-	var h maphash.Hash
-	h.WriteString(key)
-	return int(h.Sum64() % uint64(numHosts))
-}
-func (c *Client) getSum(keys []string) int {
-	total := 0
-	c.Begin()
-	allOk := true
-
-	for _, key := range keys {
-		val, ok := c.TxnGet(key)
-		if !ok {
-			allOk = false
-			break
-		}
-		total += val
-	}
-
-	if allOk {
-		c.Commit(false)
-	} else {
-		c.Abort(false)
-	}
-	return total
-}
-func getTotal(addrs []string) {
-	clients := []*Client{}
-	for i, addr := range addrs {
-		clients = append(clients, Dial(i, addr))
-	}
-
-	sum := 0
-	for i := 0; i < numberOfAccountsperClient; i++ {
-		key := fmt.Sprintf("%d", i)
-		client := clients[getHostForKey(key, len(clients))]
-		value := client.getSum([]string{key})
-		fmt.Printf("Sum for account %s = %d\n", key, value)
-		sum += value
-	}
-
-	fmt.Printf("Total sum across all accounts: %d\n", sum)
-}
-
-type HostList []string
-
-func (h *HostList) String() string {
-	return strings.Join(*h, ",")
-}
-
-func (h *HostList) Set(value string) error {
-	*h = strings.Split(value, ",")
-	return nil
-}
-
+// ------------------- Main -------------------
 func main() {
-	var hosts HostList
-	flag.Var(&hosts, "hosts", "Comma-separated host:port list")
-	theta := flag.Float64("theta", 0.99, "Zipfian skew parameter")
-	workloadName := flag.String("workload", "YCSB-B", "Workload type (YCSB-A/B/C)")
-	secs := flag.Int("secs", 8, "Duration in seconds")
-	isBank := flag.Bool("bank", false, "Run bank workload")
-	workloadsPerHost = uint32(*flag.Uint64("thrds-per-host", 8, "Threads per host"))
-	numberOfAccountsperClient = *flag.Int("accounts-per-client", 10, "Accounts per client")
-	flag.Parse()
-
-	if len(hosts) == 0 {
-		hosts = append(hosts, "localhost:8080")
-	}
-
-	fmt.Printf("hosts: %v\ntheta: %.2f\nworkload: %s\nsecs: %d\n", hosts, *theta, *workloadName, *secs)
+	addrs := []string{"localhost:8080", "localhost:8081", "localhost:8082"} // multiple shards
+	workloadsPerHost = 4
+	numberOfAccountsperClient = 10
+	keysPerTx := 3
+	durationSecs := 8
 
 	start := time.Now()
 	done := atomic.Bool{}
 	resultsCh := make(chan uint64)
 
-	for _, host := range hosts {
-		for i := 0; i < int(workloadsPerHost); i++ {
-			if *isBank {
-				go runXferClient(i, host, &done, resultsCh)
-			} else {
-				workload := kvs.NewWorkload(*workloadName, *theta)
-				go runClient(i, host, &done, workload, resultsCh)
-			}
-		}
+	for i := 0; i < int(workloadsPerHost)*len(addrs); i++ {
+		go runClient(i, addrs, &done, keysPerTx, resultsCh)
+		// Or runBankClient(i, addrs, &done, resultsCh) for bank transfers
 	}
 
-	time.Sleep(time.Duration(*secs) * time.Second)
+	time.Sleep(time.Duration(durationSecs) * time.Second)
 	done.Store(true)
 
 	totalOps := uint64(0)
-	for i := 0; i < int(workloadsPerHost)*len(hosts); i++ {
+	for i := 0; i < int(workloadsPerHost)*len(addrs); i++ {
 		totalOps += <-resultsCh
 	}
 
 	elapsed := time.Since(start)
 	fmt.Printf("Total throughput: %.2f ops/s\n", float64(totalOps)/elapsed.Seconds())
-
-	if *isBank {
-		getTotal(hosts)
-	}
 }
