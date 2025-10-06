@@ -2,10 +2,10 @@
 
 Scaling characteristics:  
 Below is a plot showing the scaling characteristics when increasing the ratio of servers to clients.  
-![][image1]  
+![](image1.png)  
 With 1 client and 2 servers, throughput reaches 80k ops/s, and with 3 servers, throughput is 90k ops/s. This tells us that around 1-2.5 clients per server is an optimal ratio. The solution scales well with multiple clients. Running with 1 client and 1 server gets around 49k ops/s, running with 2 clients and 2 servers gets to around 90k ops/s. Note here that operations are commits/second, meaning the throughput of gets and puts is roughly 3 times the ops/s since each transaction contained 3 operations.  
 In order to compare the effects on contention we evaluated the program with different theta values. Below is a chart displaying the number of aborts relative to the theta value when running 1 client to 3 servers.  
-![][image2]  
+![](image2.png)  
 In this chart, we can see that when using a completely random skew, we get only a handful of aborts. When using a workload skew of .99, we get around 1200 aborts per second, which, if we get around 85k commits/s, means 1 in every 24 transactions aborts. This makes sense as the contention around a key increases, the number of aborts will increase too. We saw this in the bank account workload as the amount of contending keys is even greater than that of the .99 theta workload and had an even greater aborts/commits ratio.
 
 ### **DESIGN**
