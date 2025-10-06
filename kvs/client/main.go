@@ -313,9 +313,8 @@ func (h *HostList) Set(value string) error {
 
 func main() {
 	hosts := HostList{}
-
 	flag.Var(&hosts, "hosts", "Comma-separated list of host:ports to connect to")
-	theta := flag.Float64("theta", 0.99, "Zipfian distribution skew parameter")
+	theta := flag.Float64("theta", .99, "Zipfian distribution skew parameter")
 	workload := flag.String("workload", "YCSB-B", "Workload type (YCSB-A, YCSB-B, YCSB-C)")
 	secs := flag.Int("secs", 30, "Duration in seconds for each client to run")
 	clientID := flag.Int("clientid", -1, "Relative client ID starting at 0")

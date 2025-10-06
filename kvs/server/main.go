@@ -221,7 +221,7 @@ func (kv *KVService) printStats() {
 	fmt.Printf("aborts/s %0.2f\ncommits/s %0.2f\nops/s %0.2f\n\n",
 		float64(diff.aborts)/deltaS,
 		float64(diff.commits)/deltaS,
-		float64(diff.aborts+diff.commits)/deltaS)
+		float64(diff.commits)/deltaS)
 }
 
 func main() {
